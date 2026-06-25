@@ -1,1 +1,45 @@
-/full-stack
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env.local
+.env.*.local
+
+# Docker
+# (compose files are tracked)
+
+# Test / Coverage
+htmlcov/
+.coverage
+.pytest_cache/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# Large data
+*.db
+*.sqlite3
+
+# Demo outputs (track code, not generated files)
+demo/*/workspace_*/
+demo/workspace_*/
