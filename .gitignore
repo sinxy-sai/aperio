@@ -40,6 +40,12 @@ htmlcov/
 *.db
 *.sqlite3
 
+# Office temp files
+~$*
+
+# Course docs (not part of the project)
+大作业.docx
+
 # Demo outputs (track code, not generated files)
 demo/*/workspace_*/
 demo/workspace_*/
