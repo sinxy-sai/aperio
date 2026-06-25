@@ -118,7 +118,7 @@ PRD评审路径：
 | 用户注册/登录/JWT认证 | 前端 Dashboard → 双模块入口 | 代码体检路由 + 服务层 |
 | SQLModel + Alembic 迁移框架 | 导航菜单增加两个入口 | PRD评审路由 + 服务层 |
 | shadcn/ui 组件库 | `.env` 增加 Agent 配置项 | DeepAgents 引擎层 |
-| Docker Compose（Traefik/PostgreSQL） | 数据库新增 Report 模型 | Skills 目录（14个SKILL.md） |
+| Docker Compose（Traefik/PostgreSQL） | 数据库新增 Report 模型 | Skills 目录（12个SKILL.md） |
 | pytest 测试框架 | — | /memories/ 存储层 |
 | Email 模板系统 | — | WebSocket handler |
 | ruff/mypy/pre-commit | — | PerformanceMiddleware + AuditMiddleware |
