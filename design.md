@@ -1,4 +1,4 @@
-# DevPulse — 研发质量多智能体守护平台 设计文档
+# Aperio — 研发质量多智能体守护平台 设计文档
 
 > 基于 DeepAgents 的全栈项目，面向《人工智能交叉学科项目应用实践》大作业，并以此为起点扩展为更完善的生产级应用。
 
@@ -27,7 +27,7 @@
 
 ### 1.1 产品定位
 
-**DevPulse** 是一款面向软件开发团队的质量守护平台，覆盖研发全周期的两个关键质量关卡：
+**Aperio** 是一款面向软件开发团队的质量守护平台，覆盖研发全周期的两个关键质量关卡：
 
 - **设计阶段**：AI 辅助 PRD 生成与多角色评审
 - **开发阶段**：AI 驱动代码仓库多维度健康体检
@@ -449,7 +449,7 @@ ArchitectureAgent 上下文：          SecurityAgent 上下文：
 # StoreBackend 配置
 store_backend = StoreBackend(
     store=InMemoryStore(),  # 开发期可换 Redis
-    namespace="devpulse",
+    namespace="aperio",
 )
 
 # Agent 通过路径访问
@@ -469,7 +469,7 @@ class DockerSandbox:
     
     def __init__(self, task_id: str):
         self.container = docker_client.containers.run(
-            image="devpulse-sandbox:latest",
+            image="aperio-sandbox:latest",
             command="sleep infinity",
             volumes={
                 f"/tmp/{task_id}/code": {"bind": "/code", "mode": "ro"},  # 只读
@@ -493,7 +493,7 @@ composite = CompositeBackend(
     rules={
         r"/workspace/.*/code/": DockerSandboxBackend(),    # 代码在沙盒
         r"/workspace/.*/drafts/": FilesystemBackend(),      # 草稿在本地
-        r"/memories/": StoreBackend(store, namespace="devpulse"),
+        r"/memories/": StoreBackend(store, namespace="aperio"),
         r"/temp/": StateBackend(),
     }
 )
@@ -525,7 +525,7 @@ composite = CompositeBackend(
 
 ```
 第一层：LangSmith Tracing（外部服务）
-  - Project: "devpulse"
+  - Project: "aperio"
   - 追踪：Agent 调用链、Tool 调用时序、完整上下文
   - 用途：调试 Agent 行为异常、回溯决策链路
 
@@ -665,9 +665,9 @@ LLM_MODEL=deepseek-v4-flash
 LLM_API_KEY=sk-xxxxx
 LLM_BASE_URL=https://api.deepseek.com
 LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=devpulse
+LANGCHAIN_PROJECT=aperio
 LANGCHAIN_API_KEY=lsv2_xxxxx
-SANDBOX_IMAGE=devpulse-sandbox:latest
+SANDBOX_IMAGE=aperio-sandbox:latest
 ```
 
 ---
