@@ -28,9 +28,12 @@ import atexit
 import io
 import json
 import os
+import re
 import shlex
+import shutil
 import sys
 import tarfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -61,7 +64,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.config import get_config
 from langgraph.types import Command
+from deepagents.middleware.skills import _list_skills_with_errors
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -74,8 +79,8 @@ SANDBOX_TARGET_CODE = "/workspace/code"
 
 
 def _skill_dir(name: str) -> str:
-    """Build absolute path to a skill directory (DeepAgents loads all SKILL.md within)."""
-    return str((SKILLS_DIR / name).resolve())
+    """Build a virtual skill source routed through CompositeBackend."""
+    return "/skills/" + name.replace("\\", "/").strip("/")
 
 
 def setup_local_resources() -> Path:
@@ -105,6 +110,184 @@ team: aperio-demo
             encoding="utf-8",
         )
     return LOCAL_RESOURCES_DIR
+
+
+def _collect_subagents(subagents: list[dict], parent: str = "root") -> list[tuple[str, dict]]:
+    collected: list[tuple[str, dict]] = []
+    for spec in subagents:
+        name = f"{parent}.{spec['name']}" if parent else spec["name"]
+        collected.append((name, spec))
+        nested = spec.get("subagents", [])
+        if nested:
+            collected.extend(_collect_subagents(nested, name))
+    return collected
+
+
+def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDockerSandbox") -> None:
+    print("\n[debug] CompositeBackend routes")
+    print(f"  default: DockerSandbox container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
+    print(f"  /outputs/ -> FilesystemBackend({run_root})")
+    print("  /memories/ -> StoreBackend(namespace=aperio)")
+    print("  /temp/ -> StateBackend()")
+    print(f"  /local-resources/ -> FilesystemBackend({local_resources}) [write denied]")
+    print(f"  /skills/ -> FilesystemBackend({SKILLS_DIR})")
+
+
+def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> None:
+    print("\n[debug] Subagents and skills")
+    print("  note: custom PerfMiddleware is attached to the main agent only; declared subagents build their own middleware stack.")
+    for name, spec in _collect_subagents(subagents):
+        skill_sources = spec.get("skills", [])
+        print(f"  - {name}: skills={skill_sources or '[]'}")
+        for source in skill_sources:
+            skills, error = _list_skills_with_errors(backend, source)
+            if error:
+                print(f"      load ERROR from {source}: {error}")
+                continue
+            if not skills:
+                print(f"      load WARNING from {source}: no SKILL.md found")
+                continue
+            for skill in skills:
+                print(f"      loaded {skill['name']} -> {skill['path']}")
+
+
+def print_expected_outputs(run_root: Path) -> None:
+    expected = [
+        run_root / "code_health" / "code_health_report.md",
+        run_root / "prd_review" / "prd_v2_final.md",
+        run_root / "prd_review" / "review_matrix.md",
+        run_root / "performance.json",
+    ]
+    print("\n[debug] Expected output files")
+    for path in expected:
+        status = "OK" if path.exists() and path.stat().st_size > 0 else "MISSING"
+        size = path.stat().st_size if path.exists() else 0
+        print(f"  {status:7} {path.relative_to(run_root)} ({size} bytes)")
+
+    alternates = [
+        run_root / "code_health_report.md",
+        run_root / "campus_nav_prd.md",
+        run_root / "campus_nav_review_report.md",
+        run_root / "smart_campus_navigator_prd_report.md",
+    ]
+    found_alternates = [path for path in alternates if path.exists() and path.stat().st_size > 0]
+    if found_alternates:
+        print("  note: found root-level alternate outputs:")
+        for path in found_alternates:
+            print(f"        {path.relative_to(run_root)} ({path.stat().st_size} bytes)")
+
+
+def _is_root_output_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip().strip("'\"")
+    if not normalized.startswith("/outputs/"):
+        return False
+    relative = normalized[len("/outputs/"):].strip("/")
+    return bool(relative) and "/" not in relative
+
+
+def _command_mentions_root_output(command: str) -> bool:
+    for match in re.findall(r"/outputs/[^\s;&|<>]+", command):
+        if _is_root_output_path(match):
+            return True
+    return False
+
+
+def handle_human_approval(agent, response, config: dict, label: str):
+    print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
+    while hasattr(response, "interrupts") and response.interrupts:
+        decisions = []
+        for interrupt in response.interrupts:
+            for action in interrupt.value.get("action_requests", []):
+                print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
+                if action['name'] == 'execute':
+                    command = action['args'].get('command', 'N/A')
+                    print(f"     命令: {command}")
+                    if _command_mentions_root_output(command):
+                        print("     自动拒绝: 禁止写入 /outputs/ 根目录，请改写到 /outputs/code_health/ 或 /outputs/prd_review/")
+                        decisions.append({
+                            "action_id": action.get("id"),
+                            "tool_name": action["name"],
+                            "type": "reject",
+                            "updated_args": None,
+                        })
+                        continue
+                elif action['name'] == 'write_file':
+                    file_path = (
+                        action['args'].get('file_path')
+                        or action['args'].get('path')
+                        or action['args'].get('filename')
+                        or action['args'].get('name')
+                        or 'N/A'
+                    )
+                    print(f"     文件: {file_path}")
+                    content = action['args'].get('content', '')
+                    print(f"     内容: {str(content)[:200]}...")
+                    if _is_root_output_path(file_path):
+                        print("     自动拒绝: 禁止写入 /outputs/ 根目录，请改写到 /outputs/code_health/ 或 /outputs/prd_review/")
+                        decisions.append({
+                            "action_id": action.get("id"),
+                            "tool_name": action["name"],
+                            "type": "reject",
+                            "updated_args": None,
+                        })
+                        continue
+                choice = input("  [a]pprove / [r]eject: ").strip().lower()
+                decisions.append({
+                    "action_id": action.get("id"),
+                    "tool_name": action["name"],
+                    "type": "approve" if choice == 'a' else "reject",
+                    "updated_args": action["args"] if choice == 'a' else None,
+                })
+        response = agent.invoke(Command(resume={"decisions": decisions}), config=config, version="v2")
+        print(f"[debug] {label} resumed_response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
+    return response
+
+
+def _copy_if_missing(source: Path, target: Path, run_root: Path) -> bool:
+    if target.exists() and target.stat().st_size > 0:
+        return False
+    if not source.exists() or source.stat().st_size == 0:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    print(f"[debug] normalized output {source.relative_to(run_root)} -> {target.relative_to(run_root)}")
+    return True
+
+
+def _extract_section(source: Path, target: Path, heading_keyword: str, run_root: Path) -> bool:
+    if target.exists() and target.stat().st_size > 0:
+        return False
+    if not source.exists() or source.stat().st_size == 0:
+        return False
+    lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = next((i for i, line in enumerate(lines) if heading_keyword in line), None)
+    if start is None:
+        return False
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("# ") and heading_keyword not in lines[i]:
+            end = i
+            break
+    content = "\n".join(lines[start:end]).strip() + "\n"
+    if not content.strip():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    print(f"[debug] extracted {heading_keyword} -> {target.relative_to(run_root)}")
+    return True
+
+
+def normalize_final_outputs(run_root: Path) -> None:
+    """Normalize model-chosen output aliases into stable demo contract paths."""
+    _copy_if_missing(
+        run_root / "code_health" / "report.md",
+        run_root / "code_health" / "code_health_report.md",
+        run_root,
+    )
+
+    prd_final = run_root / "prd_review" / "final_report.md"
+    _copy_if_missing(prd_final, run_root / "prd_review" / "prd_v2_final.md", run_root)
+    _extract_section(prd_final, run_root / "prd_review" / "review_matrix.md", "评审矩阵", run_root)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +521,11 @@ class Metrics:
     tokens_in: int = 0
     tokens_out: int = 0
     events: list = field(default_factory=list)
+    by_thread: dict = field(default_factory=dict)
+
+    def record_thread(self, thread_id: str, kind: str) -> None:
+        bucket = self.by_thread.setdefault(thread_id, {"model": 0, "tool": 0})
+        bucket[kind] = bucket.get(kind, 0) + 1
 
     def to_dict(self) -> dict:
         return {
@@ -346,6 +534,7 @@ class Metrics:
             "tool_calls": self.tool_calls,
             "tool_avg_ms": round(self.tool_time_ms / max(1, self.tool_calls), 1),
             "total_tokens": self.tokens_in + self.tokens_out,
+            "by_thread": self.by_thread,
             "events": self.events,
         }
 
@@ -353,12 +542,41 @@ class Metrics:
 class PerfMiddleware(AgentMiddleware):
     """Custom performance middleware — tracks model calls, tool calls, tokens, timing."""
 
-    def __init__(self, m: Metrics):
+    def __init__(self, m: Metrics, verbose: bool = True):
         super().__init__()
         self.m = m
+        self.verbose = verbose
+
+    @staticmethod
+    def _thread_id(request) -> str:
+        try:
+            config = get_config()
+            configurable = config.get("configurable", {})
+            if thread_id := configurable.get("thread_id"):
+                return str(thread_id)
+        except RuntimeError:
+            pass
+
+        runtime = getattr(request, "runtime", None)
+        execution_info = getattr(runtime, "execution_info", None)
+        if execution_info is not None and getattr(execution_info, "thread_id", None):
+            return str(execution_info.thread_id)
+
+        config = getattr(request, "config", None) or {}
+        configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+        return str(configurable.get("thread_id", "unknown"))
+
+    @staticmethod
+    def _tool_name(request) -> str:
+        tool = getattr(request, "tool", None)
+        if tool is None:
+            return "unknown"
+        return getattr(tool, "name", str(tool))
 
     def wrap_model_call(self, request, handler):
         self.m.model_calls += 1
+        thread_id = self._thread_id(request)
+        self.m.record_thread(thread_id, "model")
         t0 = time.perf_counter()
         try:
             response = handler(request)
@@ -376,22 +594,34 @@ class PerfMiddleware(AgentMiddleware):
                 self.m.tokens_in += usage.get("input_tokens", 0)
                 self.m.tokens_out += usage.get("output_tokens", 0)
 
-            self.m.events.append({"type": "model", "ms": round(dt, 1)})
+            event = {"type": "model", "thread_id": thread_id, "ms": round(dt, 1)}
+            self.m.events.append(event)
+            if self.verbose:
+                print(f"[debug] model_call thread={thread_id} ms={event['ms']}")
             return response
         except Exception:
             raise
 
     def wrap_tool_call(self, request, handler):
         self.m.tool_calls += 1
+        thread_id = self._thread_id(request)
+        self.m.record_thread(thread_id, "tool")
         t0 = time.perf_counter()
+        tool_name = self._tool_name(request)
         try:
             result = handler(request)
             dt = (time.perf_counter() - t0) * 1000
             self.m.tool_time_ms += dt
-            tool_name = getattr(request, 'tool', 'unknown') if hasattr(request, 'tool') else 'unknown'
-            self.m.events.append({"type": "tool", "name": str(tool_name), "ms": round(dt, 1)})
+            event = {"type": "tool", "thread_id": thread_id, "name": tool_name, "ms": round(dt, 1)}
+            self.m.events.append(event)
+            if self.verbose:
+                print(f"[debug] tool_call thread={thread_id} tool={tool_name} ms={event['ms']}")
             return result
-        except Exception:
+        except Exception as exc:
+            event = {"type": "tool_error", "thread_id": thread_id, "name": tool_name, "error": type(exc).__name__}
+            self.m.events.append(event)
+            if self.verbose:
+                print(f"[debug] tool_error thread={thread_id} tool={tool_name} error={type(exc).__name__}")
             raise
 
 
@@ -448,10 +678,13 @@ def _code_health_subagents(ws: str, target: str) -> list:
 2. read_file 逐个读取
 3. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
 4. 计算健康度评分（0-100）
-5. 必须调用 write_file 工具，将最终报告写入 {ws}/code_health_report.md
+5. 必须调用 write_file 工具，将最终报告写入这个唯一最终路径：{ws}/code_health_report.md
 
 报告使用中文，包含执行摘要和趋势对比（如有历史数据）。
-完成前请确认 {ws}/code_health_report.md 已经写入，不要只在最终消息中总结。""",
+最终输出契约：
+- 最终报告只能写入 {ws}/code_health_report.md
+- 不要写入 /outputs/code_health_report.md 或其他根级别文件名
+- 完成前请确认 {ws}/code_health_report.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing")],
         },
     ]
@@ -510,7 +743,11 @@ def _prd_review_subagents(ws: str) -> list:
 5. 必须调用 write_file 工具分别写入上述两个文件
 
 报告使用中文。
-完成前请确认 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md 已经写入，不要只在最终消息中总结。""",
+最终输出契约：
+- PRD v2 只能写入 {ws}/prd_v2_final.md
+- 评审矩阵只能写入 {ws}/review_matrix.md
+- 不要写入 /outputs/campus_nav_prd.md、/outputs/campus_nav_review_report.md 或其他根级别文件名
+- 完成前请确认 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
         },
     ]
@@ -573,10 +810,16 @@ def main():
             "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
             "/temp/": StateBackend(),
             "/local-resources/": FilesystemBackend(root_dir=str(local_resources), virtual_mode=True),
+            "/skills/": FilesystemBackend(root_dir=str(SKILLS_DIR), virtual_mode=True),
         },
     )
     checkpointer = MemorySaver()
     permissions = [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/outputs/*"],
+            mode="deny",
+        ),
         FilesystemPermission(
             operations=["write"],
             paths=["/local-resources/**"],
@@ -594,6 +837,47 @@ def main():
     # ---- Middleware ----
     metrics = Metrics()
     perf = PerfMiddleware(metrics)
+
+    code_health_orchestrator = {
+        "name": "code-health-orchestrator",
+        "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
+        "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
+
+1. 使用 write_todos 规划任务
+2. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
+3. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
+   - architect：架构分析
+   - security-analyst：安全审计
+   - dependency-checker：依赖检查
+   - doc-reviewer：文档评估
+   每个子代理将结果写入 {code_ws}/drafts/
+4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
+5. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
+    }
+    prd_review_orchestrator = {
+        "name": "prd-review-orchestrator",
+        "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
+        "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
+
+1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
+2. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
+   包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
+3. 并行派发 4 个评审子代理：
+   - product-strategist：产品策略
+   - technical-feasibility：技术可行性
+   - ux-researcher：用户体验
+   - risk-analyst：风险评估
+   每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
+4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
+
+PRD 使用中文撰写。""",
+        "subagents": _prd_review_subagents(prd_ws),
+    }
+    subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
+
+    print_backend_debug(run_root, local_resources, sandbox)
+    print_subagent_debug(subagent_specs, backend)
 
     # ---- Main Router Agent ----
     agent = create_deep_agent(
@@ -619,44 +903,7 @@ CompositeBackend 分层存储策略：
 5. /local-resources/ → 只读 FilesystemBackend，可读取 aperio_policy.yaml，但禁止写入
 
 你的职责只是识别任务类型并路由到正确的 Orchestrator，不要自己做分析。""",
-        subagents=[
-            {
-                "name": "code-health-orchestrator",
-                "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
-                "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
-
-1. 使用 write_todos 规划任务
-2. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-3. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
-   - architect：架构分析
-   - security-analyst：安全审计
-   - dependency-checker：依赖检查
-   - doc-reviewer：文档评估
-   每个子代理将结果写入 {code_ws}/drafts/
-4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
-5. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
-                "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
-            },
-            {
-                "name": "prd-review-orchestrator",
-                "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
-                "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
-
-1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-2. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
-   包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
-3. 并行派发 4 个评审子代理：
-   - product-strategist：产品策略
-   - technical-feasibility：技术可行性
-   - ux-researcher：用户体验
-   - risk-analyst：风险评估
-   每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
-4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
-
-PRD 使用中文撰写。""",
-                "subagents": _prd_review_subagents(prd_ws),
-            },
-        ],
+        subagents=subagent_specs,
     )
 
     # ---- Run: Code Health ----
@@ -673,33 +920,14 @@ PRD 使用中文撰写。""",
                 "role": "user",
                 "content": (
                     f"请对我的代码库 `{TARGET_CODE}` 进行完整的代码健康检查。"
-                    f"使用 code-health-orchestrator 执行全流程。"
+                    f"使用 code-health-orchestrator 执行全流程，并写入报告。"
                 ),
             }],
         },
         config=code_config,
         version="v2",
     )
-    # HITL: wait for human approval
-    while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
-        decisions = []
-        for interrupt in resp.interrupts:
-            for action in interrupt.value.get("action_requests", []):
-                print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
-                if action['name'] == 'execute':
-                    print(f"     命令: {action['args'].get('command', 'N/A')}")
-                elif action['name'] == 'write_file':
-                    print(f"     文件: {action['args'].get('path', 'N/A')}")
-                    content = action['args'].get('content', '')
-                    print(f"     内容: {str(content)[:200]}...")
-                choice = input("  [a]pprove / [r]eject: ").strip().lower()
-                decisions.append({
-                    "action_id": action.get("id"),
-                    "tool_name": action["name"],
-                    "type": "approve" if choice == 'a' else "reject",
-                    "updated_args": action["args"] if choice == 'a' else None,
-                })
-        resp = agent.invoke(Command(resume={"decisions": decisions}), config=code_config, version="v2")
+    resp = handle_human_approval(agent, resp, code_config, "code-health")
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -717,32 +945,14 @@ PRD 使用中文撰写。""",
                     "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
                     "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
                     "同时提供校园活动推荐和实时拥挤度信息。"
-                    "请使用 prd-review-orchestrator 执行全流程。"
+                    "请使用 prd-review-orchestrator 执行全流程，并写入报告。"
                 ),
             }],
         },
         config=prd_config,
         version="v2",
     )
-    while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
-        decisions = []
-        for interrupt in resp.interrupts:
-            for action in interrupt.value.get("action_requests", []):
-                print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
-                if action['name'] == 'execute':
-                    print(f"     命令: {action['args'].get('command', 'N/A')}")
-                elif action['name'] == 'write_file':
-                    print(f"     文件: {action['args'].get('path', 'N/A')}")
-                    content = action['args'].get('content', '')
-                    print(f"     内容: {str(content)[:200]}...")
-                choice = input("  [a]pprove / [r]eject: ").strip().lower()
-                decisions.append({
-                    "action_id": action.get("id"),
-                    "tool_name": action["name"],
-                    "type": "approve" if choice == 'a' else "reject",
-                    "updated_args": action["args"] if choice == 'a' else None,
-                })
-        resp = agent.invoke(Command(resume={"decisions": decisions}), config=prd_config, version="v2")
+    resp = handle_human_approval(agent, resp, prd_config, "prd-review")
     t_prd = time.time() - t1
 
     # ---- Output ----
@@ -762,11 +972,14 @@ PRD 使用中文撰写。""",
     (run_root / "performance.json").write_text(
         json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    normalize_final_outputs(run_root)
+
     # Output files
     print(f"\n📁 Workspace: {run_root}/")
     for f in sorted(run_root.rglob("*")):
         if f.is_file():
             print(f"   {f.relative_to(run_root)} ({f.stat().st_size} bytes)")
+    print_expected_outputs(run_root)
 
     sandbox.close()
     print(f"\n✅ Aperio Integrated Demo complete!")
