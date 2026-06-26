@@ -21,12 +21,21 @@ Usage:
   conda activate llm-dev
   python demo/aperio_integrated.py
 """
+from __future__ import annotations
+
+import base64
+import atexit
+import io
 import json
 import os
+import shlex
 import sys
+import tarfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 _DEMO_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _DEMO_DIR.parent
@@ -35,8 +44,20 @@ from dotenv import load_dotenv
 load_dotenv(_DEMO_DIR / ".env")
 
 from deepagents import create_deep_agent
-from deepagents.backends import FilesystemBackend, CompositeBackend
+from deepagents.backends import FilesystemBackend, CompositeBackend, StateBackend
+from deepagents.backends.protocol import (
+    EditResult,
+    ExecuteResponse,
+    FileData,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+    SandboxBackendProtocol,
+    WriteResult,
+)
 from deepagents.backends.store import StoreBackend
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain.agents.middleware import AgentMiddleware
@@ -45,14 +66,233 @@ from langgraph.types import Command
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_integrated").resolve())
+WORKSPACE_ROOT = (_PROJECT_ROOT / "demo/workspace_integrated").resolve()
 SKILLS_DIR = _DEMO_DIR / "04_skills"
 TARGET_CODE = "full-stack-fastapi-template-master/backend/app/core"
+SANDBOX_TARGET_CODE = "/workspace/code"
 
 
 def _skill_dir(name: str) -> str:
     """Build absolute path to a skill directory (DeepAgents loads all SKILL.md within)."""
     return str((SKILLS_DIR / name).resolve())
+
+
+# ---------------------------------------------------------------------------
+# Docker Sandbox (Exercise 12 pattern)
+# ---------------------------------------------------------------------------
+
+class DockerSandbox:
+    """DeepAgents-compatible Docker backend based on Exercise 12."""
+
+    def __init__(
+        self,
+        image: str = "python:3.11-slim",
+        working_dir: str = "/workspace",
+        remove_on_close: bool = True,
+    ):
+        try:
+            import docker
+        except ImportError as exc:
+            raise RuntimeError("docker Python package is required for sandbox mode") from exc
+
+        self.image = image
+        self.working_dir = working_dir
+        self.remove_on_close = remove_on_close
+        self.client = docker.from_env()
+        self.container = self.client.containers.run(
+            self.image,
+            command="tail -f /dev/null",
+            detach=True,
+            working_dir=self.working_dir,
+            remove=self.remove_on_close,
+        )
+        print(f"Docker sandbox: started {self.container.id[:12]} ({self.image})")
+
+    def seed_directory(self, source: Path, destination: str) -> None:
+        """Copy host directory into the container as demo input."""
+        if not source.exists():
+            raise FileNotFoundError(f"target code path not found: {source}")
+
+        self.execute(f"rm -rf {shlex.quote(destination)} && mkdir -p {shlex.quote(destination)}")
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as tar:
+            for item in source.rglob("*"):
+                arcname = str(Path(destination.lstrip("/")) / item.relative_to(source))
+                tar.add(item, arcname=arcname, recursive=False)
+        stream.seek(0)
+        ok = self.container.put_archive("/", stream.getvalue())
+        if not ok:
+            raise RuntimeError(f"failed to seed sandbox directory: {destination}")
+
+    def execute(self, command: str) -> tuple[str, int]:
+        if not self.container:
+            raise RuntimeError("sandbox container is not running")
+        exit_code, output = self.container.exec_run(
+            ["sh", "-c", command],
+            workdir=self.working_dir,
+            demux=False,
+        )
+        output_str = output.decode("utf-8", errors="replace") if output else ""
+        return output_str, exit_code
+
+    def ls(self, path: str = ".") -> LsResult:
+        try:
+            stdout, exit_code = self.execute(f"ls -1 {shlex.quote(path)}")
+            if exit_code != 0:
+                return LsResult(error=f"cannot list directory: {path}", entries=[])
+            entries = [{"path": f} for f in stdout.strip().split("\n") if f]
+            return LsResult(entries=entries, error=None)
+        except Exception as exc:
+            return LsResult(error=str(exc), entries=[])
+
+    def read(self, path: str, offset: int = 0, limit: Optional[int] = None) -> ReadResult:
+        try:
+            stdout, exit_code = self.execute(f"cat {shlex.quote(path)}")
+            if exit_code != 0:
+                return ReadResult(error=f"cannot read file: {path}")
+            lines = stdout.splitlines(keepends=True)
+            if offset > 0:
+                lines = lines[offset:]
+            if limit is not None:
+                lines = lines[:limit]
+            return ReadResult(file_data=FileData(content="".join(lines), encoding="utf-8"), error=None)
+        except Exception as exc:
+            return ReadResult(error=str(exc))
+
+    def write(self, path: str, content: bytes | str) -> WriteResult:
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        try:
+            dir_path = os.path.dirname(path)
+            if dir_path and dir_path != ".":
+                self.execute(f"mkdir -p {shlex.quote(dir_path)}")
+            content_b64 = base64.b64encode(content).decode("utf-8")
+            stdout, exit_code = self.execute(
+                f"printf %s {shlex.quote(content_b64)} | base64 -d > {shlex.quote(path)}"
+            )
+            if exit_code != 0:
+                return WriteResult(error=f"write failed: {stdout}", path=None)
+            return WriteResult(path=path, error=None)
+        except Exception as exc:
+            return WriteResult(error=str(exc), path=None)
+
+    def edit(
+        self,
+        path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+        instructions: Optional[str] = None,
+    ) -> EditResult:
+        try:
+            read_result = self.read(path)
+            if read_result.error:
+                return EditResult(path=None, error=read_result.error)
+            current = read_result.file_data["content"]
+            updated = current.replace(old_string, new_string) if replace_all else current.replace(old_string, new_string, 1)
+            if updated == current:
+                return EditResult(path=path, error=None)
+            write_result = self.write(path, updated)
+            if write_result.error:
+                return EditResult(path=None, error=write_result.error)
+            return EditResult(path=path, error=None)
+        except Exception as exc:
+            return EditResult(path=None, error=str(exc))
+
+    def glob(self, pattern: str, path: str = ".") -> GlobResult:
+        try:
+            stdout, exit_code = self.execute(
+                f"find {shlex.quote(path)} -name {shlex.quote(pattern)} -type f"
+            )
+            if exit_code != 0:
+                return GlobResult(error=f"glob failed: {stdout}", matches=[])
+            return GlobResult(matches=[f for f in stdout.strip().split("\n") if f], error=None)
+        except Exception as exc:
+            return GlobResult(error=str(exc), matches=[])
+
+    def grep(
+        self,
+        pattern: str,
+        path: str = ".",
+        recursive: bool = True,
+        glob: Optional[str] = None,
+    ) -> GrepResult:
+        try:
+            if glob:
+                cmd = (
+                    f"find {shlex.quote(path)} -name {shlex.quote(glob)} -type f "
+                    f"-exec grep -n {shlex.quote(pattern)} {{}} \\; 2>/dev/null || true"
+                )
+            else:
+                flag = "-rn" if recursive else "-n"
+                cmd = f"grep {flag} {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null || true"
+            stdout, _ = self.execute(cmd)
+            matches = []
+            for line in stdout.strip().split("\n"):
+                if not line or ":" not in line:
+                    continue
+                parts = line.split(":", 2)
+                if len(parts) == 3:
+                    file_path, line_num, content = parts
+                    try:
+                        matches.append({"path": file_path, "line": int(line_num), "text": content})
+                    except ValueError:
+                        continue
+            return GrepResult(matches=matches, error=None)
+        except Exception as exc:
+            return GrepResult(error=str(exc), matches=[])
+
+    def close(self) -> None:
+        if self.container:
+            container_id = self.container.id[:12]
+            self.container.stop()
+            if not self.remove_on_close:
+                self.container.remove()
+            self.container = None
+            print(f"Docker sandbox: cleaned {container_id}")
+
+
+class AgentDockerSandbox(SandboxBackendProtocol):
+    """Adapter that exposes DockerSandbox through SandboxBackendProtocol."""
+
+    def __init__(self, target_code: Path) -> None:
+        self._sandbox = DockerSandbox()
+        self._sandbox.seed_directory(target_code, SANDBOX_TARGET_CODE)
+
+    @property
+    def id(self) -> str:
+        return self._sandbox.container.id if self._sandbox.container else "closed"
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        output, exit_code = self._sandbox.execute(command)
+        return ExecuteResponse(output=output, exit_code=exit_code)
+
+    def ls(self, path: str = ".") -> LsResult:
+        return self._sandbox.ls(path)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        return self._sandbox.read(file_path, offset=offset, limit=limit)
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return self._sandbox.write(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        return self._sandbox.edit(file_path, old_string, new_string, replace_all=replace_all)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        return self._sandbox.glob(pattern, path or ".")
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
+        return self._sandbox.grep(pattern, path or ".", glob=glob)
+
+    def close(self) -> None:
+        self._sandbox.close()
 
 
 # ---------------------------------------------------------------------------
@@ -249,13 +489,13 @@ def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
     # ---- LangSmith ----
-    ls_key = os.environ.get("LANGSMITH_API_KEY", "")
-    if ls_key:
-        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
-        os.environ.setdefault("LANGCHAIN_PROJECT", "aperio-integrated")
-        print("LangSmith: ✅ enabled")
-    else:
-        print("LangSmith: ⚠️  not configured")
+    # ls_key = os.environ.get("LANGSMITH_API_KEY", "")
+    # if ls_key:
+    #     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    #     os.environ.setdefault("LANGCHAIN_PROJECT", "aperio-integrated")
+    #     print("LangSmith: ✅ enabled")
+    # else:
+    #     print("LangSmith: ⚠️  not configured")
 
     print("=" * 60)
     print("Aperio Integrated Demo")
@@ -266,20 +506,38 @@ def main():
     if not api_key:
         print("ERROR: DEEPSEEK_API_KEY not found")
         return
-    if not (_PROJECT_ROOT / TARGET_CODE).exists():
-        print(f"WARNING: target '{TARGET_CODE}' not found")
+    target_path = (_PROJECT_ROOT / TARGET_CODE).resolve()
+    if not target_path.exists():
+        print(f"ERROR: target '{TARGET_CODE}' not found")
+        return
 
-    Path(WORKSPACE).mkdir(parents=True, exist_ok=True)
-    Path(WORKSPACE, "drafts").mkdir(exist_ok=True)
+    run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    run_root = WORKSPACE_ROOT / run_id
+    code_ws = "/outputs/code_health"
+    prd_ws = "/outputs/prd_review"
+    (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
+    (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
 
     # ---- Backend (M4 + M5) ----
     store = InMemoryStore()
+    sandbox: AgentDockerSandbox | None = None
+    try:
+        sandbox = AgentDockerSandbox(target_path)
+    except Exception as exc:
+        print(f"ERROR: Docker sandbox unavailable: {exc}")
+        print("Run Docker Desktop, then rerun this demo in the llm-dev environment.")
+        return
+    atexit.register(sandbox.close)
+
     backend = CompositeBackend(
-        default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True),
+        default=sandbox,
         routes={
-            r"/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
+            "/outputs/": FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
+            "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
+            "/temp/": StateBackend(),
         },
     )
+    checkpointer = MemorySaver()
 
     # ---- Model ----
     model = init_chat_model(
@@ -296,6 +554,7 @@ def main():
     agent = create_deep_agent(
         model=model,
         backend=backend,
+        checkpointer=checkpointer,
         middleware=[perf],
         interrupt_on={
             "execute": {"allowed_decisions": ["approve", "reject"]},
@@ -314,33 +573,33 @@ def main():
                 "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
-2. 并行派发 4 个子代理分析 {TARGET_CODE}：
+2. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
    - doc-reviewer：文档评估
-   每个子代理将结果写入 {WORKSPACE}/drafts/
+   每个子代理将结果写入 {code_ws}/drafts/
 3. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
 4. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
-                "subagents": _code_health_subagents(WORKSPACE, TARGET_CODE),
+                "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
             },
             {
                 "name": "prd-review-orchestrator",
                 "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
                 "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
-1. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {WORKSPACE}/prd_v1.md
+1. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
    包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
 2. 并行派发 4 个评审子代理：
    - product-strategist：产品策略
    - technical-feasibility：技术可行性
    - ux-researcher：用户体验
    - risk-analyst：风险评估
-   每个子代理读取 {WORKSPACE}/prd_v1.md，将评审写入 {WORKSPACE}/drafts/
+   每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
 3. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
 
 PRD 使用中文撰写。""",
-                "subagents": _prd_review_subagents(WORKSPACE),
+                "subagents": _prd_review_subagents(prd_ws),
             },
         ],
     )
@@ -352,6 +611,7 @@ PRD 使用中文撰写。""",
     print(f"{'─' * 60}")
 
     t0 = time.time()
+    code_config = {"configurable": {"thread_id": f"{run_id}:code-health"}}
     resp = agent.invoke(
         {
             "messages": [{
@@ -362,6 +622,7 @@ PRD 使用中文撰写。""",
                 ),
             }],
         },
+        config=code_config,
         version="v2",
     )
     # HITL: wait for human approval
@@ -383,7 +644,7 @@ PRD 使用中文撰写。""",
                     "type": "approve" if choice == 'a' else "reject",
                     "updated_args": action["args"] if choice == 'a' else None,
                 })
-        resp = agent.invoke(Command(resume={"decisions": decisions}), version="v2")
+        resp = agent.invoke(Command(resume={"decisions": decisions}), config=code_config, version="v2")
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -392,6 +653,7 @@ PRD 使用中文撰写。""",
     print(f"{'─' * 60}")
 
     t1 = time.time()
+    prd_config = {"configurable": {"thread_id": f"{run_id}:prd-review"}}
     resp = agent.invoke(
         {
             "messages": [{
@@ -404,6 +666,7 @@ PRD 使用中文撰写。""",
                 ),
             }],
         },
+        config=prd_config,
         version="v2",
     )
     while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
@@ -424,7 +687,7 @@ PRD 使用中文撰写。""",
                     "type": "approve" if choice == 'a' else "reject",
                     "updated_args": action["args"] if choice == 'a' else None,
                 })
-        resp = agent.invoke(Command(resume={"decisions": decisions}), version="v2")
+        resp = agent.invoke(Command(resume={"decisions": decisions}), config=prd_config, version="v2")
     t_prd = time.time() - t1
 
     # ---- Output ----
@@ -441,14 +704,14 @@ PRD 使用中文撰写。""",
     print(f"   Total tokens:  {m['total_tokens']}")
 
     # Save perf
-    (Path(WORKSPACE) / "performance.json").write_text(
+    (run_root / "performance.json").write_text(
         json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Output files
-    print(f"\n📁 Workspace: {WORKSPACE}/")
-    for f in sorted(Path(WORKSPACE).rglob("*")):
+    print(f"\n📁 Workspace: {run_root}/")
+    for f in sorted(run_root.rglob("*")):
         if f.is_file():
-            print(f"   {f.relative_to(WORKSPACE)} ({f.stat().st_size} bytes)")
+            print(f"   {f.relative_to(run_root)} ({f.stat().st_size} bytes)")
 
     # Coverage
     print(f"\n📋 Module Coverage:")
@@ -456,10 +719,11 @@ PRD 使用中文撰写。""",
     print(f"   M2 ✅ Skills: 11 custom SKILL.md loaded via 'skills' field")
     print(f"   M3 ✅ Context: Write/Select in orchestrator prompts")
     print(f"   M4 ✅ Memory: StoreBackend /memories/")
-    print(f"   M5 ✅ Security: virtual_mode=True")
+    print(f"   M5 ✅ Security: DockerSandbox default backend + HITL execute/write_file")
     print(f"   M6 ✅ Observability: PerfMiddleware {'+ LangSmith' if ls_key else '(LangSmith latent)'}")
     print(f"   M7 ✅ Output: code_health_report.md + prd_v2_final.md + review_matrix.md")
 
+    sandbox.close()
     print(f"\n✅ Aperio Integrated Demo complete!")
 
 
