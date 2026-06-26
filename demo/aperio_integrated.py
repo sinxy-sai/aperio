@@ -364,19 +364,26 @@ PRD 使用中文撰写。""",
         },
         version="v2",
     )
-    # HITL: auto-approve any interrupts during demo
+    # HITL: wait for human approval
     while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
-        print("  ⏸️  HITL interrupt triggered — auto-approving for demo")
         decisions = []
         for interrupt in resp.interrupts:
             for action in interrupt.value.get("action_requests", []):
+                print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
+                if action['name'] == 'execute':
+                    print(f"     命令: {action['args'].get('command', 'N/A')}")
+                elif action['name'] == 'write_file':
+                    print(f"     文件: {action['args'].get('path', 'N/A')}")
+                    content = action['args'].get('content', '')
+                    print(f"     内容: {str(content)[:200]}...")
+                choice = input("  [a]pprove / [r]eject: ").strip().lower()
                 decisions.append({
                     "action_id": action.get("id"),
                     "tool_name": action["name"],
-                    "type": "approve",
-                    "updated_args": action["args"],
+                    "type": "approve" if choice == 'a' else "reject",
+                    "updated_args": action["args"] if choice == 'a' else None,
                 })
-        resp = agent.invoke(Command(resume={"decisions": decisions}))
+        resp = agent.invoke(Command(resume={"decisions": decisions}), version="v2")
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -400,17 +407,24 @@ PRD 使用中文撰写。""",
         version="v2",
     )
     while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
-        print("  ⏸️  HITL interrupt triggered — auto-approving for demo")
         decisions = []
         for interrupt in resp.interrupts:
             for action in interrupt.value.get("action_requests", []):
+                print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
+                if action['name'] == 'execute':
+                    print(f"     命令: {action['args'].get('command', 'N/A')}")
+                elif action['name'] == 'write_file':
+                    print(f"     文件: {action['args'].get('path', 'N/A')}")
+                    content = action['args'].get('content', '')
+                    print(f"     内容: {str(content)[:200]}...")
+                choice = input("  [a]pprove / [r]eject: ").strip().lower()
                 decisions.append({
                     "action_id": action.get("id"),
                     "tool_name": action["name"],
-                    "type": "approve",
-                    "updated_args": action["args"],
+                    "type": "approve" if choice == 'a' else "reject",
+                    "updated_args": action["args"] if choice == 'a' else None,
                 })
-        resp = agent.invoke(Command(resume={"decisions": decisions}))
+        resp = agent.invoke(Command(resume={"decisions": decisions}), version="v2")
     t_prd = time.time() - t1
 
     # ---- Output ----
