@@ -63,7 +63,15 @@ from deepagents.backends.store import StoreBackend
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
-from langchain.agents.middleware import AgentMiddleware
+from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+    ToolRetryMiddleware,
+)
 from langgraph.config import get_config
 from langgraph.types import Command
 from deepagents.middleware.skills import _list_skills_with_errors
@@ -149,6 +157,14 @@ def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> No
                 continue
             for skill in skills:
                 print(f"      loaded {skill['name']} -> {skill['path']}")
+
+
+def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
+    print("\n[debug] User-configured middleware")
+    print("  note: DeepAgents also installs TodoList, Filesystem, SubAgent, Summarization, and HITL middleware internally.")
+    print("  model rate limit: 10 requests/minute shared by primary and fallback models")
+    for item in middleware:
+        print(f"  - {item.name}")
 
 
 def print_expected_outputs(run_root: Path) -> None:
@@ -834,15 +850,54 @@ def main():
     ]
 
     # ---- Model ----
+    primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
+    fallback_model_name = os.environ.get("APERIO_FALLBACK_MODEL", "openai:deepseek-v4-flash")
+    model_rate_limiter = InMemoryRateLimiter(
+        requests_per_second=20 / 60,
+        check_every_n_seconds=0.1,
+        max_bucket_size=10,
+    )
     model = init_chat_model(
-        model="openai:deepseek-v4-flash",
+        model=primary_model_name,
         api_key=api_key,
         base_url="https://api.deepseek.com",
+        rate_limiter=model_rate_limiter,
+    )
+    fallback_model = init_chat_model(
+        model=fallback_model_name,
+        api_key=api_key,
+        base_url="https://api.deepseek.com",
+        rate_limiter=model_rate_limiter,
     )
 
     # ---- Middleware ----
     metrics = Metrics()
     perf = PerfMiddleware(metrics)
+    user_middleware: list[AgentMiddleware] = [
+        ModelCallLimitMiddleware(
+            run_limit=100,
+            exit_behavior="end",
+        ),
+        ModelRetryMiddleware(
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=8.0,
+            on_failure="error",
+        ),
+        ModelFallbackMiddleware(fallback_model),
+        perf,
+        ToolRetryMiddleware(
+            tools=["ls", "glob", "grep", "read_file"],
+            max_retries=2,
+            initial_delay=0.5,
+            max_delay=2.0,
+            on_failure="continue",
+        ),
+        ToolCallLimitMiddleware(
+            run_limit=160,
+            exit_behavior="continue",
+        ),
+    ]
 
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
@@ -884,13 +939,14 @@ PRD 使用中文撰写。""",
 
     print_backend_debug(run_root, local_resources, sandbox)
     print_subagent_debug(subagent_specs, backend)
+    print_middleware_debug(user_middleware)
 
     # ---- Main Router Agent ----
     agent = create_deep_agent(
         model=model,
         backend=backend,
         checkpointer=checkpointer,
-        middleware=[perf],
+        middleware=user_middleware,
         permissions=permissions,
         interrupt_on={
             "execute": {"allowed_decisions": ["approve", "reject"]},
