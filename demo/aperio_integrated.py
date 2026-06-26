@@ -448,8 +448,10 @@ def _code_health_subagents(ws: str, target: str) -> list:
 2. read_file 逐个读取
 3. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
 4. 计算健康度评分（0-100）
-5. 将最终报告写入 {ws}/code_health_report.md
-报告使用中文，包含执行摘要和趋势对比（如有历史数据）。""",
+5. 必须调用 write_file 工具，将最终报告写入 {ws}/code_health_report.md
+
+报告使用中文，包含执行摘要和趋势对比（如有历史数据）。
+完成前请确认 {ws}/code_health_report.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing")],
         },
     ]
@@ -505,7 +507,10 @@ def _prd_review_subagents(ws: str) -> list:
 3. 综合反馈，生成修订版 PRD v2 → {ws}/prd_v2_final.md
 4. 生成评审矩阵 → {ws}/review_matrix.md
    （格式：序号 | 维度 | 严重度 | 问题 | 建议 | 状态）
-报告使用中文。""",
+5. 必须调用 write_file 工具分别写入上述两个文件
+
+报告使用中文。
+完成前请确认 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
         },
     ]
@@ -762,17 +767,6 @@ PRD 使用中文撰写。""",
     for f in sorted(run_root.rglob("*")):
         if f.is_file():
             print(f"   {f.relative_to(run_root)} ({f.stat().st_size} bytes)")
-
-    # Coverage
-    print(f"\n📋 Module Coverage:")
-    print(f"   M1 ✅ Multi-subagent: Router → 2 orchestrators × (4 async + 1 sync)")
-    print(f"   M2 ✅ Skills: 11 custom SKILL.md loaded via 'skills' field")
-    print(f"   M3 ✅ Context: Write/Select in orchestrator prompts")
-    print(f"   M4 ✅ Memory: StoreBackend /memories/")
-    print(f"   M5 ✅ Security: DockerSandbox default backend + /local-resources/ read-only + HITL")
-    # observability_label = "+ LangSmith" if langsmith_enabled else "(LangSmith latent)"
-    # print(f"   M6 ✅ Observability: PerfMiddleware {observability_label}")
-    print(f"   M7 ✅ Output: code_health_report.md + prd_v2_final.md + review_matrix.md")
 
     sandbox.close()
     print(f"\n✅ Aperio Integrated Demo complete!")
