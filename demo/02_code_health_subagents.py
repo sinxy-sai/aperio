@@ -26,9 +26,9 @@ _DEMO_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _DEMO_DIR.parent
 load_dotenv(_DEMO_DIR / ".env")
 
-WORKSPACE = "demo/workspace_02"
+WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_02").resolve())
 # Relative path from project root to target code (used in task prompts)
-TARGET_CODE_REL = "full-stack-fastapi-template-master/backend/app"
+TARGET_CODE_REL = "full-stack-fastapi-template-master/backend/app/core"
 # Absolute path for existence checks
 TARGET_CODE_ABS = str((_PROJECT_ROOT / TARGET_CODE_REL).resolve())
 
@@ -65,7 +65,7 @@ _SHARED_BACKEND = FilesystemBackend(
 # Agent system prompts
 # ---------------------------------------------------------------------------
 
-ARCHITECT_PROMPT = """\
+ARCHITECT_PROMPT = f"""\
 You are a **code architect**. Analyze the given codebase for architectural patterns.
 
 Focus on:
@@ -75,12 +75,12 @@ Focus on:
 4. Code layering — is there a clear separation between API, business logic, and data layers?
 5. Strengths and weaknesses of the current architecture
 
-Write your findings to `demo/workspace_02/architect.md` using the write_file tool,
+Write your findings to {WORKSPACE}/architect.md using the write_file tool,
 then output a brief summary as your final message.  Use Chinese for your analysis.
 """
 
 
-SECURITY_PROMPT = """\
+SECURITY_PROMPT = f"""\
 You are a **security analyst**. Audit the given codebase for security issues.
 
 Focus on:
@@ -90,12 +90,12 @@ Focus on:
 4. SQL injection, XSS, CSRF risks
 5. Unsafe deserialization, path traversal, or other OWASP Top-10 concerns
 
-Write your findings to `demo/workspace_02/security.md` using the write_file tool,
+Write your findings to {WORKSPACE}/security.md using the write_file tool,
 then output a brief summary as your final message.  Use Chinese for your analysis.
 """
 
 
-DEPENDENCY_PROMPT = """\
+DEPENDENCY_PROMPT = f"""\
 You are a **dependency checker**. Review the codebase's dependencies and imports.
 
 Focus on:
@@ -105,12 +105,12 @@ Focus on:
 4. Direct vs transitive — are dependencies explicitly declared?
 5. Potential version conflicts or security advisories
 
-Write your findings to `demo/workspace_02/dependencies.md` using the write_file tool,
+Write your findings to {WORKSPACE}/dependencies.md using the write_file tool,
 then output a brief summary as your final message.  Use Chinese for your analysis.
 """
 
 
-DOC_REVIEWER_PROMPT = """\
+DOC_REVIEWER_PROMPT = f"""\
 You are a **documentation reviewer**. Evaluate the codebase's documentation quality.
 
 Focus on:
@@ -120,25 +120,25 @@ Focus on:
 4. API documentation — are endpoints, parameters, and responses documented?
 5. Areas where documentation is missing or could be improved
 
-Write your findings to `demo/workspace_02/doc_review.md` using the write_file tool,
+Write your findings to {WORKSPACE}/doc_review.md using the write_file tool,
 then output a brief summary as your final message.  Use Chinese for your analysis.
 """
 
 
-SUMMARIZER_PROMPT = """\
+SUMMARIZER_PROMPT = f"""\
 You are a **technical report summarizer**. You will be given four analysis reports
 (architecture, security, dependencies, documentation). Your job is to merge them
 into a single consolidated code health report.
 
 Do the following:
 1. First, read the four analysis files:
-   - `demo/workspace_02/architect.md`
-   - `demo/workspace_02/security.md`
-   - `demo/workspace_02/dependencies.md`
-   - `demo/workspace_02/doc_review.md`
+   - {WORKSPACE}/architect.md
+   - {WORKSPACE}/security.md
+   - {WORKSPACE}/dependencies.md
+   - {WORKSPACE}/doc_review.md
 2. Synthesize the key findings from each into a coherent report.
 3. Prioritize issues by severity (critical / warning / info).
-4. Write the final consolidated report to `demo/workspace_02/code_health_report.md`.
+4. Write the final consolidated report to {WORKSPACE}/code_health_report.md.
 
 Use Chinese for the report.  The report should have clear sections for each
 analysis dimension plus an executive summary at the top.
@@ -240,10 +240,10 @@ async def main():
             "messages": [{
                 "role": "user",
                 "content": (
-                    "The four analysis reports have been written to the workspace. "
-                    "Read demo/workspace_02/architect.md, demo/workspace_02/security.md, "
-                    "demo/workspace_02/dependencies.md, and demo/workspace_02/doc_review.md. "
-                    "Then merge them into a consolidated demo/workspace_02/code_health_report.md. "
+                    f"The four analysis reports have been written to the workspace. "
+                    f"Read {WORKSPACE}/architect.md, {WORKSPACE}/security.md, "
+                    f"{WORKSPACE}/dependencies.md, and {WORKSPACE}/doc_review.md. "
+                    f"Then merge them into a consolidated {WORKSPACE}/code_health_report.md. "
                     "最后输出中文摘要。"
                 ),
             }],
