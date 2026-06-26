@@ -626,7 +626,9 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 最终报告只能写入 {ws}/code_health_report.md
 - 不要写入 /outputs/code_health_report.md、/outputs/core_code_health_report.md 或其他根级别文件名
 - 不要写入 {ws}/drafts/merged-report.md 作为最终报告；drafts 目录只保存中间草稿
-- 完成前请确认 {ws}/code_health_report.md 已经写入，不要只在最终消息中总结。""",
+- 调用 write_file 成功写入 {ws}/code_health_report.md 后立即结束任务
+- 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
+- /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": [_skill_dir("general/report-writing")],
         },
     ]
@@ -690,7 +692,9 @@ def _prd_review_subagents(ws: str) -> list:
 - 评审矩阵只能写入 {ws}/review_matrix.md
 - 完成上述两个标准文件后立即停止，不要再创建副本、别名、merged 文件或根目录 /outputs/*.md 文件
 - 不要写入 {ws}/final_report.md 作为最终报告；必须拆分为上述两个标准文件
-- 完成前请确认 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md 已经写入，不要只在最终消息中总结。""",
+- 调用 write_file 成功写入上述两个标准文件后立即结束任务
+- 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
+- /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
         },
     ]
@@ -835,7 +839,8 @@ def main():
    每个子代理将结果写入 {code_ws}/drafts/
 4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
 5. summarizer 的唯一最终产物必须是 {code_ws}/code_health_report.md；不要接受 /outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
-6. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+6. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
+7. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
         "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
     }
     prd_review_orchestrator = {
@@ -855,6 +860,7 @@ def main():
 4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
 5. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
 6. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
+7. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
 
 PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws),
