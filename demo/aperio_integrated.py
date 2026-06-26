@@ -48,9 +48,9 @@ SKILLS_DIR = _DEMO_DIR / "04_skills"
 TARGET_CODE = "full-stack-fastapi-template-master/backend/app/core"
 
 
-def _skill_path(name: str) -> str:
-    """Build absolute path to a SKILL.md."""
-    return str((SKILLS_DIR / name / "SKILL.md").resolve())
+def _skill_dir(name: str) -> str:
+    """Build absolute path to a skill directory (DeepAgents loads all SKILL.md within)."""
+    return str((SKILLS_DIR / name).resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 是否存在循环依赖、God Class
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果写入 {ws}/drafts/architect.md，最后输出中文摘要。""",
-            "skills": [_skill_path("code-health/code-architect")],
+            "skills": [_skill_dir("code-health/code-architect")],
         },
         {
             "name": "security-analyst",
@@ -135,7 +135,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 不安全反序列化、路径遍历
 - 敏感端点认证缺失
 将分析结果写入 {ws}/drafts/security.md，最后输出中文摘要。""",
-            "skills": [_skill_path("code-health/code-security")],
+            "skills": [_skill_dir("code-health/code-security")],
         },
         {
             "name": "dependency-checker",
@@ -144,7 +144,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果写入 {ws}/drafts/dependencies.md，最后输出中文摘要。""",
-            "skills": [_skill_path("code-health/code-dependency")],
+            "skills": [_skill_dir("code-health/code-dependency")],
         },
         {
             "name": "doc-reviewer",
@@ -153,7 +153,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - README 完整性、公开 API docstring 覆盖率
 - 注释质量、配置说明
 将分析结果写入 {ws}/drafts/documentation.md，最后输出中文摘要。""",
-            "skills": [_skill_path("code-health/code-documentation")],
+            "skills": [_skill_dir("code-health/code-documentation")],
         },
         {
             "name": "summarizer",
@@ -165,7 +165,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 4. 计算健康度评分（0-100）
 5. 将最终报告写入 {ws}/code_health_report.md
 报告使用中文，包含执行摘要和趋势对比（如有历史数据）。""",
-            "skills": [_skill_path("general/report-writing")],
+            "skills": [_skill_dir("general/report-writing")],
         },
     ]
 
@@ -181,7 +181,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 商业价值和差异化在哪里
 - MVP 功能优先级是否合理
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
-            "skills": [_skill_path("prd-review/review-ops")],
+            "skills": [_skill_dir("prd-review/review-ops")],
         },
         {
             "name": "technical-feasibility",
@@ -191,7 +191,7 @@ def _prd_review_subagents(ws: str) -> list:
 - API 设计是否清晰、性能预期是否合理
 - 是否有安全隐患
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
-            "skills": [_skill_path("prd-review/review-tech")],
+            "skills": [_skill_dir("prd-review/review-tech")],
         },
         {
             "name": "ux-researcher",
@@ -200,7 +200,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 用户操作路径是否最短、异常状态是否覆盖
 - 交互一致性、无障碍、信息架构
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
-            "skills": [_skill_path("prd-review/review-ux")],
+            "skills": [_skill_dir("prd-review/review-ux")],
         },
         {
             "name": "risk-analyst",
@@ -209,7 +209,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 时间线和资源风险、团队能力匹配
 - 数据隐私合规、用户采纳障碍
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
-            "skills": [_skill_path("prd-review/review-test")],
+            "skills": [_skill_dir("prd-review/review-test")],
         },
         {
             "name": "editor",
@@ -221,7 +221,7 @@ def _prd_review_subagents(ws: str) -> list:
 4. 生成评审矩阵 → {ws}/review_matrix.md
    （格式：序号 | 维度 | 严重度 | 问题 | 建议 | 状态）
 报告使用中文。""",
-            "skills": [_skill_path("general/report-writing"), _skill_path("general/review-matrix")],
+            "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
         },
     ]
 
