@@ -22,8 +22,8 @@ from deepagents.backends.store import StoreBackend
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 
-WORKSPACE = "demo/workspace_08"
-MEMORIES_DIR = "demo/longterm_memory"
+WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_08").resolve())
+MEMORIES_DIR = str((_PROJECT_ROOT / "demo/longterm_memory").resolve())
 
 
 def _build_model():
@@ -52,7 +52,7 @@ def main():
     store = InMemoryStore()
 
     backend = CompositeBackend(
-        default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=False),
+        default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True),
         routes={
             r"/memories/": StoreBackend(store=store, namespace="aperio"),
         },

@@ -18,7 +18,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend, CompositeBackend, StateBackend
 from langchain.chat_models import init_chat_model
 
-WORKSPACE = "demo/workspace_06"
+WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_06").resolve())
 
 
 def _check_docker() -> bool:
@@ -62,7 +62,7 @@ def main():
     # /workspace/*/drafts/ routes to local FS (safe for writing reports)
     # /temp/ routes to ephemeral StateBackend
     backend = CompositeBackend(
-        default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=False),
+        default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True),
         routes={
             r"/temp/": StateBackend(),
         },

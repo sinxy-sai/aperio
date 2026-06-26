@@ -20,7 +20,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain.chat_models import init_chat_model
 
-WORKSPACE = "demo/workspace_07"
+WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_07").resolve())
 
 
 # ---- Performance Middleware ----
@@ -136,7 +136,7 @@ def main():
         base_url="https://api.deepseek.com",
     )
 
-    backend = FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=False)
+    backend = FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True)
     Path(WORKSPACE).mkdir(parents=True, exist_ok=True)
 
     # Initialize middleware
