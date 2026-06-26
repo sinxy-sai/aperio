@@ -1,0 +1,17 @@
+security:
+  sandbox: docker
+  require_human_approval:
+    - execute
+    - write_file
+storage:
+  default: docker_sandbox
+  outputs: filesystem
+  temp: state
+  memories: store
+  local_resources: read_only_filesystem
+code_health:
+  source_path: /workspace/code
+  report_path: /outputs/code_health
+prd_review:
+  report_path: /outputs/prd_review
+team: aperio-demo

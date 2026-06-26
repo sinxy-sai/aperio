@@ -43,7 +43,7 @@ _PROJECT_ROOT = _DEMO_DIR.parent
 from dotenv import load_dotenv
 load_dotenv(_DEMO_DIR / ".env")
 
-from deepagents import create_deep_agent
+from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import FilesystemBackend, CompositeBackend, StateBackend
 from deepagents.backends.protocol import (
     EditResult,
@@ -68,6 +68,7 @@ from langgraph.types import Command
 # ---------------------------------------------------------------------------
 WORKSPACE_ROOT = (_PROJECT_ROOT / "demo/workspace_integrated").resolve()
 SKILLS_DIR = _DEMO_DIR / "04_skills"
+LOCAL_RESOURCES_DIR = _DEMO_DIR / "local_resources"
 TARGET_CODE = "full-stack-fastapi-template-master/backend/app/core"
 SANDBOX_TARGET_CODE = "/workspace/code"
 
@@ -75,6 +76,35 @@ SANDBOX_TARGET_CODE = "/workspace/code"
 def _skill_dir(name: str) -> str:
     """Build absolute path to a skill directory (DeepAgents loads all SKILL.md within)."""
     return str((SKILLS_DIR / name).resolve())
+
+
+def setup_local_resources() -> Path:
+    """Create read-only local resources exposed through CompositeBackend."""
+    LOCAL_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+    policy_file = LOCAL_RESOURCES_DIR / "aperio_policy.yaml"
+    if not policy_file.exists():
+        policy_file.write_text(
+            """security:
+  sandbox: docker
+  require_human_approval:
+    - execute
+    - write_file
+storage:
+  default: docker_sandbox
+  outputs: filesystem
+  temp: state
+  memories: store
+  local_resources: read_only_filesystem
+code_health:
+  source_path: /workspace/code
+  report_path: /outputs/code_health
+prd_review:
+  report_path: /outputs/prd_review
+team: aperio-demo
+""",
+            encoding="utf-8",
+        )
+    return LOCAL_RESOURCES_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +545,7 @@ def main():
     run_root = WORKSPACE_ROOT / run_id
     code_ws = "/outputs/code_health"
     prd_ws = "/outputs/prd_review"
+    local_resources = setup_local_resources()
     (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
     (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
 
@@ -535,9 +566,17 @@ def main():
             "/outputs/": FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
             "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
             "/temp/": StateBackend(),
+            "/local-resources/": FilesystemBackend(root_dir=str(local_resources), virtual_mode=True),
         },
     )
     checkpointer = MemorySaver()
+    permissions = [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/local-resources/**"],
+            mode="deny",
+        ),
+    ]
 
     # ---- Model ----
     model = init_chat_model(
@@ -556,6 +595,7 @@ def main():
         backend=backend,
         checkpointer=checkpointer,
         middleware=[perf],
+        permissions=permissions,
         interrupt_on={
             "execute": {"allowed_decisions": ["approve", "reject"]},
             "write_file": {"allowed_decisions": ["approve", "reject"]},
@@ -565,6 +605,13 @@ def main():
 - 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
 - 如果用户要求**写 PRD、评审需求、产品需求文档**→ 委托给 prd-review-orchestrator
 
+CompositeBackend 分层存储策略：
+1. 默认路径 → DockerSandbox，所有未匹配路径和 execute 工具都在隔离容器中执行
+2. /outputs/ → 本次运行的本地输出区，用于保存 code_health 和 prd_review 报告
+3. /temp/ → StateBackend，适合会话内临时文件
+4. /memories/ → StoreBackend，适合跨线程共享记忆和历史趋势
+5. /local-resources/ → 只读 FilesystemBackend，可读取 aperio_policy.yaml，但禁止写入
+
 你的职责只是识别任务类型并路由到正确的 Orchestrator，不要自己做分析。""",
         subagents=[
             {
@@ -573,14 +620,15 @@ def main():
                 "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
-2. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
+2. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
+3. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
    - doc-reviewer：文档评估
    每个子代理将结果写入 {code_ws}/drafts/
-3. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
-4. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
+5. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
                 "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
             },
             {
@@ -588,15 +636,16 @@ def main():
                 "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
                 "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
-1. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
+1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
+2. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
    包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
-2. 并行派发 4 个评审子代理：
+3. 并行派发 4 个评审子代理：
    - product-strategist：产品策略
    - technical-feasibility：技术可行性
    - ux-researcher：用户体验
    - risk-analyst：风险评估
    每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
-3. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
+4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
 
 PRD 使用中文撰写。""",
                 "subagents": _prd_review_subagents(prd_ws),
@@ -719,7 +768,7 @@ PRD 使用中文撰写。""",
     print(f"   M2 ✅ Skills: 11 custom SKILL.md loaded via 'skills' field")
     print(f"   M3 ✅ Context: Write/Select in orchestrator prompts")
     print(f"   M4 ✅ Memory: StoreBackend /memories/")
-    print(f"   M5 ✅ Security: DockerSandbox default backend + HITL execute/write_file")
+    print(f"   M5 ✅ Security: DockerSandbox default backend + /local-resources/ read-only + HITL")
     print(f"   M6 ✅ Observability: PerfMiddleware {'+ LangSmith' if ls_key else '(LangSmith latent)'}")
     print(f"   M7 ✅ Output: code_health_report.md + prd_v2_final.md + review_matrix.md")
 
