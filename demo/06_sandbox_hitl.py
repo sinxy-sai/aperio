@@ -34,7 +34,8 @@ def _check_docker() -> bool:
 
 
 def _load_skill(name: str) -> str:
-    path = _DEMO_DIR / "04_skills" / name / "SKILL.md"
+    skill_name = name.split("/")[-1]
+    path = _DEMO_DIR / "04_skills" / name / skill_name / "SKILL.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""

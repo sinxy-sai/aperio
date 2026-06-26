@@ -29,8 +29,9 @@ WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_05").resolve())
 
 
 def _load_skill(name: str) -> str:
-    """Progressive disclosure: load a skill on demand (Select pattern)."""
-    path = _DEMO_DIR / "04_skills" / name / "SKILL.md"
+    """Load a skill from its nested directory (dir/skillname/SKILL.md)."""
+    skill_name = name.split("/")[-1]
+    path = _DEMO_DIR / "04_skills" / name / skill_name / "SKILL.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return f"# {name}\n(Skill file not found — using default prompt)"
