@@ -54,7 +54,7 @@ def main():
     backend = CompositeBackend(
         default=FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True),
         routes={
-            r"/memories/": StoreBackend(store=store, namespace="aperio"),
+            r"/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
         },
     )
 
