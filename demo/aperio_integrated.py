@@ -40,6 +40,7 @@ from deepagents.backends.store import StoreBackend
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.types import Command
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -296,6 +297,10 @@ def main():
         model=model,
         backend=backend,
         middleware=[perf],
+        interrupt_on={
+            "execute": {"allowed_decisions": ["approve", "reject"]},
+            "write_file": {"allowed_decisions": ["approve", "reject"]},
+        },
         system_prompt="""你是 Aperio 研发质量平台的**任务路由器**。根据用户输入判断任务类型：
 
 - 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
@@ -347,15 +352,31 @@ PRD 使用中文撰写。""",
     print(f"{'─' * 60}")
 
     t0 = time.time()
-    _ = agent.invoke({
-        "messages": [{
-            "role": "user",
-            "content": (
-                f"请对我的代码库 `{TARGET_CODE}` 进行完整的代码健康检查。"
-                f"使用 code-health-orchestrator 执行全流程。"
-            ),
-        }],
-    })
+    resp = agent.invoke(
+        {
+            "messages": [{
+                "role": "user",
+                "content": (
+                    f"请对我的代码库 `{TARGET_CODE}` 进行完整的代码健康检查。"
+                    f"使用 code-health-orchestrator 执行全流程。"
+                ),
+            }],
+        },
+        version="v2",
+    )
+    # HITL: auto-approve any interrupts during demo
+    while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
+        print("  ⏸️  HITL interrupt triggered — auto-approving for demo")
+        decisions = []
+        for interrupt in resp.interrupts:
+            for action in interrupt.value.get("action_requests", []):
+                decisions.append({
+                    "action_id": action.get("id"),
+                    "tool_name": action["name"],
+                    "type": "approve",
+                    "updated_args": action["args"],
+                })
+        resp = agent.invoke(Command(resume={"decisions": decisions}))
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -364,17 +385,32 @@ PRD 使用中文撰写。""",
     print(f"{'─' * 60}")
 
     t1 = time.time()
-    _ = agent.invoke({
-        "messages": [{
-            "role": "user",
-            "content": (
-                "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
-                "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
-                "同时提供校园活动推荐和实时拥挤度信息。"
-                "请使用 prd-review-orchestrator 执行全流程。"
-            ),
-        }],
-    })
+    resp = agent.invoke(
+        {
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
+                    "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
+                    "同时提供校园活动推荐和实时拥挤度信息。"
+                    "请使用 prd-review-orchestrator 执行全流程。"
+                ),
+            }],
+        },
+        version="v2",
+    )
+    while hasattr(resp, '__iter__') and hasattr(resp, 'interrupts') and resp.interrupts:
+        print("  ⏸️  HITL interrupt triggered — auto-approving for demo")
+        decisions = []
+        for interrupt in resp.interrupts:
+            for action in interrupt.value.get("action_requests", []):
+                decisions.append({
+                    "action_id": action.get("id"),
+                    "tool_name": action["name"],
+                    "type": "approve",
+                    "updated_args": action["args"],
+                })
+        resp = agent.invoke(Command(resume={"decisions": decisions}))
     t_prd = time.time() - t1
 
     # ---- Output ----
