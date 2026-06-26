@@ -25,7 +25,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain.chat_models import init_chat_model
 
-WORKSPACE = "demo/workspace_05"
+WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_05").resolve())
 
 
 def _load_skill(name: str) -> str:
@@ -81,7 +81,7 @@ async def main():
     Path(WORKSPACE, "drafts").mkdir(exist_ok=True)
 
     model = _build_model()
-    backend = FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=False)
+    backend = FilesystemBackend(root_dir=str(_PROJECT_ROOT), virtual_mode=True)
 
     # ISOLATE: each sub-agent loads ONLY its own skill
     architect_skill = _load_skill("code-health/code-architect")
@@ -120,7 +120,7 @@ explaining how each pillar was demonstrated."""
     )
 
     # Target code
-    target = "full-stack-fastapi-template-master/backend/app"
+    target = "full-stack-fastapi-template-master/backend/app/core"
 
     result = agent.invoke({
         "messages": [{
