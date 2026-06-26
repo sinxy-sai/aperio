@@ -10,6 +10,7 @@ Workspace: demo/workspace_02/
 """
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -166,17 +167,10 @@ async def run_analysis_agent(name: str, agent, task: str) -> dict:
             "messages": [{"role": "user", "content": task}],
         })
         elapsed = time.time() - t0
-        final_msg = result["messages"][-1].content
-        # Replace emoji and other non-ASCII chars that can crash GBK console
+        final_msg = result["messages"][-1].content if result.get("messages") else "(no response)"
         short_preview = final_msg[:120].replace("\n", " ")
-        # Sanitize: keep only printable ASCII + common CJK for preview
-        safe = []
-        for ch in short_preview:
-            if ord(ch) < 0x10000:  # drop high-plane chars that break GBK
-                safe.append(ch)
-        safe_preview = "".join(safe)
-        print(f"  [{name}] done in {elapsed:.1f}s -> {safe_preview}...")
-        return {"agent": name, "elapsed": elapsed, "ok": True, "preview": safe_preview}
+        print(f"  [{name}] done in {elapsed:.1f}s -> {short_preview}...")
+        return {"agent": name, "elapsed": elapsed, "ok": True, "preview": final_msg[:200]}
     except Exception as exc:
         elapsed = time.time() - t0
         print(f"  [{name}] FAILED in {elapsed:.1f}s: {exc}")
@@ -184,6 +178,7 @@ async def run_analysis_agent(name: str, agent, task: str) -> dict:
 
 
 async def main():
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     print("=" * 60)
     print("Demo 02: Code Health Multi-Subagent Orchestration")
     print("=" * 60)
@@ -240,21 +235,33 @@ async def main():
         system_prompt=SUMMARIZER_PROMPT,
     )
     t_phase3 = time.time()
-    summary_result = summarizer.invoke({
-        "messages": [{
-            "role": "user",
-            "content": (
-                "The four analysis reports have been written to the workspace. "
-                "Read demo/workspace_02/architect.md, demo/workspace_02/security.md, "
-                "demo/workspace_02/dependencies.md, and demo/workspace_02/doc_review.md. "
-                "Then merge them into a consolidated demo/workspace_02/code_health_report.md. "
-                "最后输出中文摘要。"
-            ),
-        }],
-    })
+    try:
+        summary_result = summarizer.invoke({
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "The four analysis reports have been written to the workspace. "
+                    "Read demo/workspace_02/architect.md, demo/workspace_02/security.md, "
+                    "demo/workspace_02/dependencies.md, and demo/workspace_02/doc_review.md. "
+                    "Then merge them into a consolidated demo/workspace_02/code_health_report.md. "
+                    "最后输出中文摘要。"
+                ),
+            }],
+        })
+    except Exception as exc:
+        phase3_elapsed = time.time() - t_phase3
+        print(f"  Summarizer FAILED in {phase3_elapsed:.1f}s: {exc}")
+        print(f"\n{'=' * 60}")
+        print("Demo 02 complete!")
+        print(f"  Phase 2 (4x parallel): {phase2_elapsed:.1f}s")
+        print(f"  Phase 3 (summarizer):  FAILED ({exc})")
+        print(f"  Workspace: {WORKSPACE}/")
+        print(f"  Agents: architect, security-analyst, dependency-checker, doc-reviewer, summarizer")
+        print(f"{'=' * 60}")
+        return
     phase3_elapsed = time.time() - t_phase3
     print(f"  Summarizer done in {phase3_elapsed:.1f}s")
-    final_content = summary_result["messages"][-1].content
+    final_content = summary_result["messages"][-1].content if summary_result.get("messages") else "(no response)"
     print(f"  Final: {final_content[:200]}")
 
     # ---- Done ---------------------------------------------------------------------
