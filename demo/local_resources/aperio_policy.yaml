@@ -9,9 +9,19 @@ storage:
   temp: state
   memories: store
   local_resources: read_only_filesystem
+output_contract:
+  root_markdown_aliases: denied
+  final_outputs:
+    - /outputs/code_health/code_health_report.md
+    - /outputs/prd_review/prd_v2_final.md
+    - /outputs/prd_review/review_matrix.md
 code_health:
   source_path: /workspace/code
-  report_path: /outputs/code_health
+  draft_dir: /outputs/code_health/drafts
+  final_report: /outputs/code_health/code_health_report.md
 prd_review:
-  report_path: /outputs/prd_review
+  draft_dir: /outputs/prd_review/drafts
+  prd_v1: /outputs/prd_review/prd_v1.md
+  final_prd: /outputs/prd_review/prd_v2_final.md
+  review_matrix: /outputs/prd_review/review_matrix.md
 team: aperio-demo

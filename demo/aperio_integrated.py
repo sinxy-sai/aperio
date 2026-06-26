@@ -108,11 +108,21 @@ storage:
   temp: state
   memories: store
   local_resources: read_only_filesystem
+output_contract:
+  root_markdown_aliases: denied
+  final_outputs:
+    - /outputs/code_health/code_health_report.md
+    - /outputs/prd_review/prd_v2_final.md
+    - /outputs/prd_review/review_matrix.md
 code_health:
   source_path: /workspace/code
-  report_path: /outputs/code_health
+  draft_dir: /outputs/code_health/drafts
+  final_report: /outputs/code_health/code_health_report.md
 prd_review:
-  report_path: /outputs/prd_review
+  draft_dir: /outputs/prd_review/drafts
+  prd_v1: /outputs/prd_review/prd_v1.md
+  final_prd: /outputs/prd_review/prd_v2_final.md
+  review_matrix: /outputs/prd_review/review_matrix.md
 team: aperio-demo
 """,
             encoding="utf-8",
@@ -162,7 +172,7 @@ def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> No
 def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
     print("\n[debug] User-configured middleware")
     print("  note: DeepAgents also installs TodoList, Filesystem, SubAgent, Summarization, and HITL middleware internally.")
-    print("  model rate limit: 10 requests/minute shared by primary and fallback models")
+    print("  model rate limit: 20 requests/minute shared by primary and fallback models")
     for item in middleware:
         print(f"  - {item.name}")
 
@@ -208,12 +218,57 @@ def _command_mentions_root_output(command: str) -> bool:
     return False
 
 
+def _canonical_final_path(label: str, requested_path: str, content: str) -> str | None:
+    requested = requested_path.replace("\\", "/").lower()
+    content_head = content[:3000].lower()
+    if label == "code-health":
+        return "/outputs/code_health/code_health_report.md"
+    if label == "prd-review":
+        matrix_markers = (
+            "review_matrix",
+            "review-report",
+            "review_report",
+            "matrix",
+            "评审矩阵",
+            "评审合并",
+            "评审概览",
+            "评审报告",
+        )
+        prd_markers = (
+            "prd",
+            "需求文档",
+            "prd v2",
+            "prdv2",
+            "终版",
+        )
+        if any(marker in requested for marker in matrix_markers):
+            return "/outputs/prd_review/review_matrix.md"
+        if any(marker in content_head for marker in matrix_markers):
+            return "/outputs/prd_review/review_matrix.md"
+        if any(marker in requested for marker in prd_markers):
+            return "/outputs/prd_review/prd_v2_final.md"
+        if any(marker in content_head for marker in prd_markers):
+            return "/outputs/prd_review/prd_v2_final.md"
+        return None
+    return None
+
+
+def _virtual_output_exists(run_root: Path | None, virtual_path: str) -> bool:
+    if run_root is None:
+        return False
+    normalized = virtual_path.replace("\\", "/").strip().strip("'\"")
+    if not normalized.startswith("/outputs/"):
+        return False
+    relative = normalized[len("/outputs/"):].strip("/")
+    return (run_root / relative).exists()
+
+
 def _is_approval_choice(choice: str) -> bool:
     normalized = re.sub(r"[^a-z]", "", choice.lower())
     return normalized.startswith("a") or normalized == "yes" or normalized == "y"
 
 
-def handle_human_approval(agent, response, config: dict, label: str):
+def handle_human_approval(agent, response, config: dict, label: str, run_root: Path | None = None):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
         decisions = []
@@ -236,6 +291,8 @@ def handle_human_approval(agent, response, config: dict, label: str):
                     file_path = (
                         action['args'].get('file_path')
                         or action['args'].get('path')
+                        or action['args'].get('filepath')
+                        or action['args'].get('file')
                         or action['args'].get('filename')
                         or action['args'].get('name')
                         or 'N/A'
@@ -243,13 +300,47 @@ def handle_human_approval(agent, response, config: dict, label: str):
                     print(f"     文件: {file_path}")
                     content = action['args'].get('content', '')
                     print(f"     内容: {str(content)[:200]}...")
-                    if _is_root_output_path(file_path):
-                        print("     自动拒绝: 禁止写入 /outputs/ 根目录，请改写到 /outputs/code_health/ 或 /outputs/prd_review/")
+                    if file_path == "N/A":
+                        print("     自动拒绝: write_file 缺少 file_path/path 参数")
                         decisions.append({
                             "action_id": action.get("id"),
                             "tool_name": action["name"],
                             "type": "reject",
                             "updated_args": None,
+                        })
+                        continue
+                    if _is_root_output_path(file_path):
+                        redirected_path = _canonical_final_path(label, file_path, str(content))
+                        if redirected_path is None:
+                            print(f"     自动拒绝: 根目录输出不是标准交付物路径: {file_path}")
+                            decisions.append({
+                                "action_id": action.get("id"),
+                                "tool_name": action["name"],
+                                "type": "reject",
+                                "updated_args": None,
+                            })
+                            continue
+                        if _virtual_output_exists(run_root, redirected_path):
+                            print(f"     自动拒绝: 标准交付物已存在，不再创建根目录别名: {file_path}")
+                            decisions.append({
+                                "action_id": action.get("id"),
+                                "tool_name": action["name"],
+                                "type": "reject",
+                                "updated_args": None,
+                            })
+                            continue
+                        updated_args = dict(action["args"])
+                        path_key = next(
+                            (key for key in ("file_path", "path", "filepath", "file", "filename", "name") if key in updated_args),
+                            "file_path",
+                        )
+                        updated_args[path_key] = redirected_path
+                        print(f"     自动改写: {file_path} -> {redirected_path}")
+                        decisions.append({
+                            "action_id": action.get("id"),
+                            "tool_name": action["name"],
+                            "type": "approve",
+                            "updated_args": updated_args,
                         })
                         continue
                 choice = input("  [a]pprove / [r]eject: ").strip().lower()
@@ -301,14 +392,20 @@ def _extract_section(source: Path, target: Path, heading_keyword: str, run_root:
 
 def normalize_final_outputs(run_root: Path) -> None:
     """Normalize model-chosen output aliases into stable demo contract paths."""
-    _copy_if_missing(
+    for candidate in [
         run_root / "code_health" / "report.md",
-        run_root / "code_health" / "code_health_report.md",
-        run_root,
-    )
+        run_root / "code_health" / "drafts" / "merged-report.md",
+    ]:
+        if _copy_if_missing(candidate, run_root / "code_health" / "code_health_report.md", run_root):
+            break
 
-    prd_final = run_root / "prd_review" / "final_report.md"
-    _copy_if_missing(prd_final, run_root / "prd_review" / "prd_v2_final.md", run_root)
+    for candidate in [
+        run_root / "prd_review" / "final_report.md",
+        run_root / "prd_review" / "prd_v2_final.md",
+    ]:
+        if _copy_if_missing(candidate, run_root / "prd_review" / "prd_v2_final.md", run_root):
+            break
+    prd_final = run_root / "prd_review" / "prd_v2_final.md"
     _extract_section(prd_final, run_root / "prd_review" / "review_matrix.md", "评审矩阵", run_root)
 
 
@@ -705,7 +802,8 @@ def _code_health_subagents(ws: str, target: str) -> list:
 报告使用中文，包含执行摘要和趋势对比（如有历史数据）。
 最终输出契约：
 - 最终报告只能写入 {ws}/code_health_report.md
-- 不要写入 /outputs/code_health_report.md 或其他根级别文件名
+- 不要写入 /outputs/code_health_report.md、/outputs/core_code_health_report.md 或其他根级别文件名
+- 不要写入 {ws}/drafts/merged-report.md 作为最终报告；drafts 目录只保存中间草稿
 - 完成前请确认 {ws}/code_health_report.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing")],
         },
@@ -768,7 +866,8 @@ def _prd_review_subagents(ws: str) -> list:
 最终输出契约：
 - PRD v2 只能写入 {ws}/prd_v2_final.md
 - 评审矩阵只能写入 {ws}/review_matrix.md
-- 不要写入 /outputs/campus_nav_prd.md、/outputs/campus_nav_review_report.md 或其他根级别文件名
+- 完成上述两个标准文件后立即停止，不要再创建副本、别名、merged 文件或根目录 /outputs/*.md 文件
+- 不要写入 {ws}/final_report.md 作为最终报告；必须拆分为上述两个标准文件
 - 完成前请确认 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md 已经写入，不要只在最终消息中总结。""",
             "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
         },
@@ -913,7 +1012,8 @@ def main():
    - doc-reviewer：文档评估
    每个子代理将结果写入 {code_ws}/drafts/
 4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
-5. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+5. summarizer 的唯一最终产物必须是 {code_ws}/code_health_report.md；不要接受 /outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
+6. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
         "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
     }
     prd_review_orchestrator = {
@@ -931,6 +1031,8 @@ def main():
    - risk-analyst：风险评估
    每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
 4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
+5. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
+6. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
 
 PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws),
@@ -989,7 +1091,7 @@ CompositeBackend 分层存储策略：
         config=code_config,
         version="v2",
     )
-    resp = handle_human_approval(agent, resp, code_config, "code-health")
+    resp = handle_human_approval(agent, resp, code_config, "code-health", run_root)
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -1007,14 +1109,14 @@ CompositeBackend 分层存储策略：
                     "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
                     "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
                     "同时提供校园活动推荐和实时拥挤度信息。"
-                    "请使用 prd-review-orchestrator 执行全流程，并写入报告。"
+                    "请使用 prd-review-orchestrator 执行全流程，并写入标准 PRD v2 和评审矩阵。"
                 ),
             }],
         },
         config=prd_config,
         version="v2",
     )
-    resp = handle_human_approval(agent, resp, prd_config, "prd-review")
+    resp = handle_human_approval(agent, resp, prd_config, "prd-review", run_root)
     t_prd = time.time() - t1
 
     # ---- Output ----
