@@ -519,8 +519,9 @@ def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
     # ---- LangSmith ----
-    # ls_key = os.environ.get("LANGSMITH_API_KEY", "")
-    # if ls_key:
+    # langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY", "")
+    # langsmith_enabled = bool(langsmith_key)
+    # if langsmith_enabled:
     #     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     #     os.environ.setdefault("LANGCHAIN_PROJECT", "aperio-integrated")
     #     print("LangSmith: ✅ enabled")
@@ -769,7 +770,8 @@ PRD 使用中文撰写。""",
     print(f"   M3 ✅ Context: Write/Select in orchestrator prompts")
     print(f"   M4 ✅ Memory: StoreBackend /memories/")
     print(f"   M5 ✅ Security: DockerSandbox default backend + /local-resources/ read-only + HITL")
-    print(f"   M6 ✅ Observability: PerfMiddleware {'+ LangSmith' if ls_key else '(LangSmith latent)'}")
+    # observability_label = "+ LangSmith" if langsmith_enabled else "(LangSmith latent)"
+    # print(f"   M6 ✅ Observability: PerfMiddleware {observability_label}")
     print(f"   M7 ✅ Output: code_health_report.md + prd_v2_final.md + review_matrix.md")
 
     sandbox.close()
