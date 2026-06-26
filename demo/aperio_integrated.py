@@ -30,7 +30,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sys
 import tarfile
 import threading
@@ -190,85 +189,13 @@ def print_expected_outputs(run_root: Path) -> None:
         size = path.stat().st_size if path.exists() else 0
         print(f"  {status:7} {path.relative_to(run_root)} ({size} bytes)")
 
-    alternates = [
-        run_root / "code_health_report.md",
-        run_root / "campus_nav_prd.md",
-        run_root / "campus_nav_review_report.md",
-        run_root / "smart_campus_navigator_prd_report.md",
-    ]
-    found_alternates = [path for path in alternates if path.exists() and path.stat().st_size > 0]
-    if found_alternates:
-        print("  note: found root-level alternate outputs:")
-        for path in found_alternates:
-            print(f"        {path.relative_to(run_root)} ({path.stat().st_size} bytes)")
-
-
-def _is_root_output_path(path: str) -> bool:
-    normalized = path.replace("\\", "/").strip().strip("'\"")
-    if not normalized.startswith("/outputs/"):
-        return False
-    relative = normalized[len("/outputs/"):].strip("/")
-    return bool(relative) and "/" not in relative
-
-
-def _command_mentions_root_output(command: str) -> bool:
-    for match in re.findall(r"/outputs/[^\s;&|<>]+", command):
-        if _is_root_output_path(match):
-            return True
-    return False
-
-
-def _canonical_final_path(label: str, requested_path: str, content: str) -> str | None:
-    requested = requested_path.replace("\\", "/").lower()
-    content_head = content[:3000].lower()
-    if label == "code-health":
-        return "/outputs/code_health/code_health_report.md"
-    if label == "prd-review":
-        matrix_markers = (
-            "review_matrix",
-            "review-report",
-            "review_report",
-            "matrix",
-            "评审矩阵",
-            "评审合并",
-            "评审概览",
-            "评审报告",
-        )
-        prd_markers = (
-            "prd",
-            "需求文档",
-            "prd v2",
-            "prdv2",
-            "终版",
-        )
-        if any(marker in requested for marker in matrix_markers):
-            return "/outputs/prd_review/review_matrix.md"
-        if any(marker in content_head for marker in matrix_markers):
-            return "/outputs/prd_review/review_matrix.md"
-        if any(marker in requested for marker in prd_markers):
-            return "/outputs/prd_review/prd_v2_final.md"
-        if any(marker in content_head for marker in prd_markers):
-            return "/outputs/prd_review/prd_v2_final.md"
-        return None
-    return None
-
-
-def _virtual_output_exists(run_root: Path | None, virtual_path: str) -> bool:
-    if run_root is None:
-        return False
-    normalized = virtual_path.replace("\\", "/").strip().strip("'\"")
-    if not normalized.startswith("/outputs/"):
-        return False
-    relative = normalized[len("/outputs/"):].strip("/")
-    return (run_root / relative).exists()
-
 
 def _is_approval_choice(choice: str) -> bool:
     normalized = re.sub(r"[^a-z]", "", choice.lower())
     return normalized.startswith("a") or normalized == "yes" or normalized == "y"
 
 
-def handle_human_approval(agent, response, config: dict, label: str, run_root: Path | None = None):
+def handle_human_approval(agent, response, config: dict, label: str):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
         decisions = []
@@ -278,15 +205,6 @@ def handle_human_approval(agent, response, config: dict, label: str, run_root: P
                 if action['name'] == 'execute':
                     command = action['args'].get('command', 'N/A')
                     print(f"     命令: {command}")
-                    if _command_mentions_root_output(command):
-                        print("     自动拒绝: 禁止写入 /outputs/ 根目录，请改写到 /outputs/code_health/ 或 /outputs/prd_review/")
-                        decisions.append({
-                            "action_id": action.get("id"),
-                            "tool_name": action["name"],
-                            "type": "reject",
-                            "updated_args": None,
-                        })
-                        continue
                 elif action['name'] == 'write_file':
                     file_path = (
                         action['args'].get('file_path')
@@ -300,49 +218,6 @@ def handle_human_approval(agent, response, config: dict, label: str, run_root: P
                     print(f"     文件: {file_path}")
                     content = action['args'].get('content', '')
                     print(f"     内容: {str(content)[:200]}...")
-                    if file_path == "N/A":
-                        print("     自动拒绝: write_file 缺少 file_path/path 参数")
-                        decisions.append({
-                            "action_id": action.get("id"),
-                            "tool_name": action["name"],
-                            "type": "reject",
-                            "updated_args": None,
-                        })
-                        continue
-                    if _is_root_output_path(file_path):
-                        redirected_path = _canonical_final_path(label, file_path, str(content))
-                        if redirected_path is None:
-                            print(f"     自动拒绝: 根目录输出不是标准交付物路径: {file_path}")
-                            decisions.append({
-                                "action_id": action.get("id"),
-                                "tool_name": action["name"],
-                                "type": "reject",
-                                "updated_args": None,
-                            })
-                            continue
-                        if _virtual_output_exists(run_root, redirected_path):
-                            print(f"     自动拒绝: 标准交付物已存在，不再创建根目录别名: {file_path}")
-                            decisions.append({
-                                "action_id": action.get("id"),
-                                "tool_name": action["name"],
-                                "type": "reject",
-                                "updated_args": None,
-                            })
-                            continue
-                        updated_args = dict(action["args"])
-                        path_key = next(
-                            (key for key in ("file_path", "path", "filepath", "file", "filename", "name") if key in updated_args),
-                            "file_path",
-                        )
-                        updated_args[path_key] = redirected_path
-                        print(f"     自动改写: {file_path} -> {redirected_path}")
-                        decisions.append({
-                            "action_id": action.get("id"),
-                            "tool_name": action["name"],
-                            "type": "approve",
-                            "updated_args": updated_args,
-                        })
-                        continue
                 choice = input("  [a]pprove / [r]eject: ").strip().lower()
                 approved = _is_approval_choice(choice)
                 decisions.append({
@@ -354,59 +229,6 @@ def handle_human_approval(agent, response, config: dict, label: str, run_root: P
         response = agent.invoke(Command(resume={"decisions": decisions}), config=config, version="v2")
         print(f"[debug] {label} resumed_response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     return response
-
-
-def _copy_if_missing(source: Path, target: Path, run_root: Path) -> bool:
-    if target.exists() and target.stat().st_size > 0:
-        return False
-    if not source.exists() or source.stat().st_size == 0:
-        return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
-    print(f"[debug] normalized output {source.relative_to(run_root)} -> {target.relative_to(run_root)}")
-    return True
-
-
-def _extract_section(source: Path, target: Path, heading_keyword: str, run_root: Path) -> bool:
-    if target.exists() and target.stat().st_size > 0:
-        return False
-    if not source.exists() or source.stat().st_size == 0:
-        return False
-    lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
-    start = next((i for i, line in enumerate(lines) if heading_keyword in line), None)
-    if start is None:
-        return False
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if lines[i].startswith("# ") and heading_keyword not in lines[i]:
-            end = i
-            break
-    content = "\n".join(lines[start:end]).strip() + "\n"
-    if not content.strip():
-        return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    print(f"[debug] extracted {heading_keyword} -> {target.relative_to(run_root)}")
-    return True
-
-
-def normalize_final_outputs(run_root: Path) -> None:
-    """Normalize model-chosen output aliases into stable demo contract paths."""
-    for candidate in [
-        run_root / "code_health" / "report.md",
-        run_root / "code_health" / "drafts" / "merged-report.md",
-    ]:
-        if _copy_if_missing(candidate, run_root / "code_health" / "code_health_report.md", run_root):
-            break
-
-    for candidate in [
-        run_root / "prd_review" / "final_report.md",
-        run_root / "prd_review" / "prd_v2_final.md",
-    ]:
-        if _copy_if_missing(candidate, run_root / "prd_review" / "prd_v2_final.md", run_root):
-            break
-    prd_final = run_root / "prd_review" / "prd_v2_final.md"
-    _extract_section(prd_final, run_root / "prd_review" / "review_matrix.md", "评审矩阵", run_root)
 
 
 # ---------------------------------------------------------------------------
@@ -1091,7 +913,7 @@ CompositeBackend 分层存储策略：
         config=code_config,
         version="v2",
     )
-    resp = handle_human_approval(agent, resp, code_config, "code-health", run_root)
+    resp = handle_human_approval(agent, resp, code_config, "code-health")
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
@@ -1116,7 +938,7 @@ CompositeBackend 分层存储策略：
         config=prd_config,
         version="v2",
     )
-    resp = handle_human_approval(agent, resp, prd_config, "prd-review", run_root)
+    resp = handle_human_approval(agent, resp, prd_config, "prd-review")
     t_prd = time.time() - t1
 
     # ---- Output ----
@@ -1135,8 +957,6 @@ CompositeBackend 分层存储策略：
     # Save perf
     (run_root / "performance.json").write_text(
         json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    normalize_final_outputs(run_root)
 
     # Output files
     print(f"\n📁 Workspace: {run_root}/")
