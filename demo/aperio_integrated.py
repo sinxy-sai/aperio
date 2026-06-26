@@ -39,6 +39,7 @@ from deepagents.backends import FilesystemBackend, CompositeBackend
 from deepagents.backends.store import StoreBackend
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
+from langchain.agents.middleware import AgentMiddleware
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -78,33 +79,46 @@ class Metrics:
         }
 
 
-class PerfMiddleware:
+class PerfMiddleware(AgentMiddleware):
+    """Custom performance middleware — tracks model calls, tool calls, tokens, timing."""
+
     def __init__(self, m: Metrics):
+        super().__init__()
         self.m = m
 
-    def wrap_model_call(self, call, *args, **kwargs):
+    def wrap_model_call(self, request, handler):
+        self.m.model_calls += 1
         t0 = time.perf_counter()
         try:
-            result = call(*args, **kwargs)
+            response = handler(request)
             dt = (time.perf_counter() - t0) * 1000
-            usage = getattr(result, "usage_metadata", {}) or {}
-            self.m.model_calls += 1
             self.m.model_time_ms += dt
-            self.m.tokens_in += usage.get("input_tokens", 0)
-            self.m.tokens_out += usage.get("output_tokens", 0)
+
+            # Extract token usage from response
+            actual = None
+            if hasattr(response, 'result') and isinstance(response.result, list) and len(response.result) > 0:
+                actual = response.result[0]
+            elif hasattr(response, 'result'):
+                actual = response.result
+            if actual and hasattr(actual, 'usage_metadata'):
+                usage = actual.usage_metadata or {}
+                self.m.tokens_in += usage.get("input_tokens", 0)
+                self.m.tokens_out += usage.get("output_tokens", 0)
+
             self.m.events.append({"type": "model", "ms": round(dt, 1)})
-            return result
+            return response
         except Exception:
             raise
 
-    def wrap_tool_call(self, call, tool_name, *args, **kwargs):
+    def wrap_tool_call(self, request, handler):
+        self.m.tool_calls += 1
         t0 = time.perf_counter()
         try:
-            result = call(*args, **kwargs)
+            result = handler(request)
             dt = (time.perf_counter() - t0) * 1000
-            self.m.tool_calls += 1
             self.m.tool_time_ms += dt
-            self.m.events.append({"type": "tool", "name": tool_name, "ms": round(dt, 1)})
+            tool_name = getattr(request, 'tool', 'unknown') if hasattr(request, 'tool') else 'unknown'
+            self.m.events.append({"type": "tool", "name": str(tool_name), "ms": round(dt, 1)})
             return result
         except Exception:
             raise
