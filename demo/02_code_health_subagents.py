@@ -148,7 +148,7 @@ def main():
 
     backend = FilesystemBackend(
         root_dir=str(_PROJECT_ROOT.resolve()),
-        virtual_mode=False,
+        virtual_mode=True,
     )
 
     agent = create_deep_agent(
