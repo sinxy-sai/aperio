@@ -192,6 +192,11 @@ def _command_mentions_root_output(command: str) -> bool:
     return False
 
 
+def _is_approval_choice(choice: str) -> bool:
+    normalized = re.sub(r"[^a-z]", "", choice.lower())
+    return normalized.startswith("a") or normalized == "yes" or normalized == "y"
+
+
 def handle_human_approval(agent, response, config: dict, label: str):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
@@ -232,11 +237,12 @@ def handle_human_approval(agent, response, config: dict, label: str):
                         })
                         continue
                 choice = input("  [a]pprove / [r]eject: ").strip().lower()
+                approved = _is_approval_choice(choice)
                 decisions.append({
                     "action_id": action.get("id"),
                     "tool_name": action["name"],
-                    "type": "approve" if choice == 'a' else "reject",
-                    "updated_args": action["args"] if choice == 'a' else None,
+                    "type": "approve" if approved else "reject",
+                    "updated_args": action["args"] if approved else None,
                 })
         response = agent.invoke(Command(resume={"decisions": decisions}), config=config, version="v2")
         print(f"[debug] {label} resumed_response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
