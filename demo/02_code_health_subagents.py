@@ -2,13 +2,12 @@
 Demo 02: Code Health Multi-Subagent Orchestration.
 
 Pipeline:
-  Orchestrator (sync) spawns 4 analysis sub-agents in parallel (async),
-  then Summarizer (sync) merges the results into a consolidated report.
+  Orchestrator (sync) spawns 4 analysis sub-agents in parallel,
+  then Summarizer merges results into a consolidated report.
 
 Sub-agents: architect, security-analyst, dependency-checker, doc-reviewer, summarizer
 Workspace: demo/workspace_02/
 """
-import asyncio
 import os
 import sys
 import time
@@ -27,14 +26,11 @@ _PROJECT_ROOT = _DEMO_DIR.parent
 load_dotenv(_DEMO_DIR / ".env")
 
 WORKSPACE = str((_PROJECT_ROOT / "demo/workspace_02").resolve())
-# Relative path from project root to target code (used in task prompts)
 TARGET_CODE_REL = "full-stack-fastapi-template-master/backend/app/core"
-# Absolute path for existence checks
 TARGET_CODE_ABS = str((_PROJECT_ROOT / TARGET_CODE_REL).resolve())
 
 
 def _build_model():
-    """Create the shared model instance."""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:
         raise RuntimeError(
@@ -49,20 +45,7 @@ def _build_model():
 
 
 # ---------------------------------------------------------------------------
-# Shared backend
-#
-# virtual_mode=False so agents can read the real filesystem.
-# root_dir is the project root so relative paths like "full-stack-..." resolve.
-# Agents are explicitly instructed to write output into demo/workspace_02/.
-# ---------------------------------------------------------------------------
-_SHARED_BACKEND = FilesystemBackend(
-    root_dir=str(_PROJECT_ROOT.resolve()),
-    virtual_mode=False,
-)
-
-
-# ---------------------------------------------------------------------------
-# Agent system prompts
+# Sub-agent system prompts
 # ---------------------------------------------------------------------------
 
 ARCHITECT_PROMPT = f"""\
@@ -72,13 +55,12 @@ Focus on:
 1. Module structure and organization — how are files/directories laid out?
 2. Design patterns in use (MVC, repository, dependency injection, etc.)
 3. Coupling and cohesion — are modules well-separated or tangled?
-4. Code layering — is there a clear separation between API, business logic, and data layers?
+4. Code layering — is there clear separation between API, business logic, and data layers?
 5. Strengths and weaknesses of the current architecture
 
 Write your findings to {WORKSPACE}/architect.md using the write_file tool,
-then output a brief summary as your final message.  Use Chinese for your analysis.
+then output a brief summary as your final message. Use Chinese for your analysis.
 """
-
 
 SECURITY_PROMPT = f"""\
 You are a **security analyst**. Audit the given codebase for security issues.
@@ -91,9 +73,8 @@ Focus on:
 5. Unsafe deserialization, path traversal, or other OWASP Top-10 concerns
 
 Write your findings to {WORKSPACE}/security.md using the write_file tool,
-then output a brief summary as your final message.  Use Chinese for your analysis.
+then output a brief summary as your final message. Use Chinese for your analysis.
 """
-
 
 DEPENDENCY_PROMPT = f"""\
 You are a **dependency checker**. Review the codebase's dependencies and imports.
@@ -106,9 +87,8 @@ Focus on:
 5. Potential version conflicts or security advisories
 
 Write your findings to {WORKSPACE}/dependencies.md using the write_file tool,
-then output a brief summary as your final message.  Use Chinese for your analysis.
+then output a brief summary as your final message. Use Chinese for your analysis.
 """
-
 
 DOC_REVIEWER_PROMPT = f"""\
 You are a **documentation reviewer**. Evaluate the codebase's documentation quality.
@@ -121,64 +101,34 @@ Focus on:
 5. Areas where documentation is missing or could be improved
 
 Write your findings to {WORKSPACE}/doc_review.md using the write_file tool,
-then output a brief summary as your final message.  Use Chinese for your analysis.
+then output a brief summary as your final message. Use Chinese for your analysis.
 """
-
 
 SUMMARIZER_PROMPT = f"""\
 You are a **technical report summarizer**. You will be given four analysis reports
-(architecture, security, dependencies, documentation). Your job is to merge them
-into a single consolidated code health report.
+(architecture, security, dependencies, documentation). Merge them into one
+consolidated code health report.
 
 Do the following:
-1. First, read the four analysis files:
+1. Read the four analysis files:
    - {WORKSPACE}/architect.md
    - {WORKSPACE}/security.md
    - {WORKSPACE}/dependencies.md
    - {WORKSPACE}/doc_review.md
-2. Synthesize the key findings from each into a coherent report.
+2. Synthesize key findings from each into a coherent report.
 3. Prioritize issues by severity (critical / warning / info).
 4. Write the final consolidated report to {WORKSPACE}/code_health_report.md.
 
-Use Chinese for the report.  The report should have clear sections for each
-analysis dimension plus an executive summary at the top.
-"""
+Use Chinese for the report. Include an executive summary at the top."""
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Main
 # ---------------------------------------------------------------------------
 
-def _build_analysis_agent(system_prompt: str, model):
-    """Build a single-purpose analysis sub-agent sharing the global backend."""
-    return create_deep_agent(
-        model=model,
-        backend=_SHARED_BACKEND,
-        system_prompt=system_prompt,
-    )
-
-
-async def run_analysis_agent(name: str, agent, task: str) -> dict:
-    """Run one analysis agent asynchronously and return its result metadata."""
-    print(f"  [{name}] starting ...")
-    t0 = time.time()
-    try:
-        result = await agent.ainvoke({
-            "messages": [{"role": "user", "content": task}],
-        })
-        elapsed = time.time() - t0
-        final_msg = result["messages"][-1].content if result.get("messages") else "(no response)"
-        short_preview = final_msg[:120].replace("\n", " ")
-        print(f"  [{name}] done in {elapsed:.1f}s -> {short_preview}...")
-        return {"agent": name, "elapsed": elapsed, "ok": True, "preview": final_msg[:200]}
-    except Exception as exc:
-        elapsed = time.time() - t0
-        print(f"  [{name}] FAILED in {elapsed:.1f}s: {exc}")
-        return {"agent": name, "elapsed": elapsed, "ok": False, "error": str(exc)}
-
-
-async def main():
+def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
     print("=" * 60)
     print("Demo 02: Code Health Multi-Subagent Orchestration")
     print("=" * 60)
@@ -188,91 +138,81 @@ async def main():
     # Verify target exists
     target_path = Path(TARGET_CODE_ABS)
     if not target_path.exists():
-        print(f"WARNING: target code path '{TARGET_CODE_REL}' not found - agents may fail.")
+        print(f"WARNING: target code path '{TARGET_CODE_REL}' not found.")
     else:
         py_files = list(target_path.glob("**/*.py"))
         print(f"Target: {TARGET_CODE_REL}  ({len(py_files)} .py files found)")
 
-    # Ensure workspace directory exists
+    # Ensure workspace exists
     Path(WORKSPACE).mkdir(parents=True, exist_ok=True)
 
-    task_template = (
-        f"Analyze the codebase under '{TARGET_CODE_REL}'. "
-        "First use ls and glob tools to explore the directory structure, "
-        "then use read_file and grep to examine the source code in depth. "
-        "Write your report using write_file (see your system prompt for the exact output path), "
-        "then output a brief summary as your final message. "
-        "Use Chinese for your analysis."
+    backend = FilesystemBackend(
+        root_dir=str(_PROJECT_ROOT.resolve()),
+        virtual_mode=False,
     )
 
-    # ---- Phase 1: Build all agents ------------------------------------------------
-    print("\n[Phase 1] Building agents ...")
-    agents = {
-        "architect":          _build_analysis_agent(ARCHITECT_PROMPT,     model),
-        "security-analyst":   _build_analysis_agent(SECURITY_PROMPT,      model),
-        "dependency-checker": _build_analysis_agent(DEPENDENCY_PROMPT,    model),
-        "doc-reviewer":       _build_analysis_agent(DOC_REVIEWER_PROMPT,  model),
-    }
-
-    # ---- Phase 2: Run 4 analysis agents in parallel --------------------------------
-    print(f"\n[Phase 2] Running 4 analysis sub-agents in parallel ...")
-    t_phase2 = time.time()
-    results = await asyncio.gather(*(
-        run_analysis_agent(name, agent, task_template)
-        for name, agent in agents.items()
-    ))
-    phase2_elapsed = time.time() - t_phase2
-    print(f"\n  All 4 completed in {phase2_elapsed:.1f}s total (parallel).")
-
-    ok_count = sum(1 for r in results if r["ok"])
-    print(f"  Success: {ok_count}/4")
-
-    # ---- Phase 3: Summarizer (sync) ------------------------------------------------
-    print(f"\n[Phase 3] Running Summarizer (sync) ...")
-    summarizer = create_deep_agent(
+    agent = create_deep_agent(
         model=model,
-        backend=_SHARED_BACKEND,
-        system_prompt=SUMMARIZER_PROMPT,
-    )
-    t_phase3 = time.time()
-    try:
-        summary_result = summarizer.invoke({
-            "messages": [{
-                "role": "user",
-                "content": (
-                    f"The four analysis reports have been written to the workspace. "
-                    f"Read {WORKSPACE}/architect.md, {WORKSPACE}/security.md, "
-                    f"{WORKSPACE}/dependencies.md, and {WORKSPACE}/doc_review.md. "
-                    f"Then merge them into a consolidated {WORKSPACE}/code_health_report.md. "
-                    "最后输出中文摘要。"
-                ),
-            }],
-        })
-    except Exception as exc:
-        phase3_elapsed = time.time() - t_phase3
-        print(f"  Summarizer FAILED in {phase3_elapsed:.1f}s: {exc}")
-        print(f"\n{'=' * 60}")
-        print("Demo 02 complete!")
-        print(f"  Phase 2 (4x parallel): {phase2_elapsed:.1f}s")
-        print(f"  Phase 3 (summarizer):  FAILED ({exc})")
-        print(f"  Workspace: {WORKSPACE}/")
-        print(f"  Agents: architect, security-analyst, dependency-checker, doc-reviewer, summarizer")
-        print(f"{'=' * 60}")
-        return
-    phase3_elapsed = time.time() - t_phase3
-    print(f"  Summarizer done in {phase3_elapsed:.1f}s")
-    final_content = summary_result["messages"][-1].content if summary_result.get("messages") else "(no response)"
-    print(f"  Final: {final_content[:200]}")
+        backend=backend,
+        system_prompt=f"""You are a code health orchestrator. Your job:
 
-    # ---- Done ---------------------------------------------------------------------
-    print(f"\n{'=' * 60}")
-    print("Demo 02 complete!")
-    print(f"  Phase 2 (4x parallel): {phase2_elapsed:.1f}s")
-    print(f"  Phase 3 (summarizer):  {phase3_elapsed:.1f}s")
-    print(f"  Workspace: {WORKSPACE}/")
-    print(f"  Agents: architect, security-analyst, dependency-checker, doc-reviewer, summarizer")
-    print(f"{'=' * 60}")
+1. Use write_todos to plan: 4 parallel analysis sub-agents → summarizer.
+2. Spawn ALL 4 analysis sub-agents IN PARALLEL to analyze the code at `{TARGET_CODE_REL}`.
+   Each sub-agent knows its own focus area and will write its report to {WORKSPACE}/.
+3. Wait for ALL 4 to finish, then spawn the summarizer to merge results.
+4. Tell the summarizer to write the final report to {WORKSPACE}/code_health_report.md.
+
+IMPORTANT: The 4 analysis sub-agents MUST run in parallel, not sequentially.""",
+        subagents=[
+            {
+                "name": "architect",
+                "description": "Analyze code architecture: module structure, coupling, layering, design patterns",
+                "system_prompt": ARCHITECT_PROMPT,
+            },
+            {
+                "name": "security-analyst",
+                "description": "Audit code security: injection, secrets, deserialization, OWASP Top-10",
+                "system_prompt": SECURITY_PROMPT,
+            },
+            {
+                "name": "dependency-checker",
+                "description": "Check dependencies: versions, CVEs, license compatibility, imports",
+                "system_prompt": DEPENDENCY_PROMPT,
+            },
+            {
+                "name": "doc-reviewer",
+                "description": "Review documentation: README, docstrings, comments, API docs",
+                "system_prompt": DOC_REVIEWER_PROMPT,
+            },
+            {
+                "name": "summarizer",
+                "description": "Merge all 4 analysis reports into a consolidated code health report",
+                "system_prompt": SUMMARIZER_PROMPT,
+            },
+        ],
+    )
+
+    t0 = time.time()
+    result = agent.invoke({
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"Run the full code health pipeline on `{TARGET_CODE_REL}`:\\n\\n"
+                f"1. Spawn 4 sub-agents IN PARALLEL: architect, security-analyst, "
+                f"dependency-checker, doc-reviewer\\n"
+                f"2. After all 4 complete, spawn the summarizer to produce "
+                f"{WORKSPACE}/code_health_report.md\\n"
+            ),
+        }],
+    })
+    elapsed = time.time() - t0
+
+    final = result["messages"][-1].content if result.get("messages") else "(empty)"
+    print(f"\\n✅ Demo 02 complete in {elapsed:.1f}s!")
+    print(f"   Agents: architect, security-analyst, dependency-checker, doc-reviewer, summarizer")
+    print(f"   Workspace: {WORKSPACE}/")
+    print(f"   Final report: {WORKSPACE}/code_health_report.md")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
