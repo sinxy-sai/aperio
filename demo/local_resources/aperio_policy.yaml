@@ -31,10 +31,16 @@ code_health:
       - mypy
       - bandit
       - pip-audit
-    schema: code-health-tools-v2
+      - pytest
+      - coverage
+      - deptry
+      - interrogate
+    schema: code-health-tools-v3
     install_project_deps_default: false
     mypy_default_mode: lightweight_ignore_missing_imports
     mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
+    pytest_coverage_limitation: "pytest and coverage depend on discovered tests and installed project dependencies"
+    deptry_limitation: "without installed project dependencies, transitive dependency analysis can be incomplete"
     raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts

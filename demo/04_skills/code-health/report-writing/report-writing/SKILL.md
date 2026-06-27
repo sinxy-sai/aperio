@@ -1,6 +1,6 @@
 ---
 name: report-writing
-description: Use when merging code-health drafts into the final Aperio code health report, especially when the report must combine ruff, mypy, bandit, pip-audit, and human review evidence into a Chinese Markdown artifact.
+description: Use when merging code-health drafts into the final Aperio code health report, especially when the report must combine ruff, mypy, bandit, pip-audit, pytest, coverage, deptry, interrogate, and human review evidence into a Chinese Markdown artifact.
 triggers:
   - 代码健康报告
   - 健康度评分
@@ -29,6 +29,8 @@ triggers:
 5. 如果 `coverage_notes.mypy_mode=lightweight_ignore_missing_imports`，必须说明 mypy 忽略缺失第三方依赖导入，结论不等同完整 CI 类型检查。
 6. 如果 `setup.dependency_install.skipped=true`，必须说明项目依赖未安装，依赖审计和类型检查覆盖会受限。
 7. 如果 `tools.pip_audit.timed_out=true` 或 `exit_code=124`，必须说明依赖漏洞审计未完成，不能宣称依赖无漏洞。
+8. 如果 `tools.pytest.skipped=true` 或 `tools.coverage.skipped=true`，必须说明测试/覆盖率未覆盖；如果 pytest 因导入失败退出，不要把它写成业务测试失败。
+9. 如果 `tools.deptry` 或 `tools.interrogate` 不可用，必须说明未覆盖未使用依赖/缺失依赖检查或 docstring 自动统计；如果项目依赖未安装，也要说明 deptry 传递依赖判断可能不完整。
 
 ## 报告结构
 
@@ -70,4 +72,5 @@ triggers:
 - 如果所有关键工具都未运行，最高 85 分。
 - 如果 mypy 为轻量模式，不要把“未发现更多类型问题”写成“类型安全完整通过”。
 - 如果 pip-audit 超时或未运行，不要给出“依赖无已知漏洞”的结论。
+- 如果 pytest/coverage 未运行或失败，不要给出“测试覆盖充分”的结论。
 - 如果只扫描了子目录，必须说明评分只代表该扫描范围。

@@ -15,11 +15,11 @@ triggers:
 
 ## 工作流程
 
-1. 先读取 `/outputs/code_health/raw/tool_results.json`，确认 `discovery.dependency_files`、`setup.dependency_install` 和 `tools.pip_audit`。
+1. 先读取 `/outputs/code_health/raw/tool_results.json`，确认 `discovery.dependency_files`、`setup.dependency_install`、`tools.pip_audit` 和 `tools.deptry`。
 2. 如果 `tools.pip_audit.available=false` 或 `skipped=true`，只能报告“未执行漏洞数据库扫描”，不要编造 CVE 或最新版本。
 3. 读取依赖清单文件，识别直接依赖、版本约束和锁文件是否存在。
 4. 检查许可证兼容性时必须说明依据；没有元数据时只提出“需确认”。
-5. 识别未声明的传递依赖和未使用依赖时必须给出 import 或配置证据。
+5. 识别未声明的传递依赖和未使用依赖时优先引用 `tools.deptry`。deptry 当前按项目根目录 `.` 分析依赖清单，结论比只扫子目录更适合判断 unused dependency；仍需结合 import 或配置证据复核。
 6. 给出升级优先级（Critical CVE > 安全扫描不可用但高风险依赖 > 主版本落后 > 次版本落后）。
 7. 默认不要联网逐包查询版本。只有 `tools.pip_audit` 结果不足且确实需要公开公告补充时，最多调用 1 次 `internet_search` 做聚合查询；引用时必须保留链接。
 
@@ -27,6 +27,8 @@ triggers:
 
 - 必须区分“工具事实”“人工推断”“待验证项”。
 - 如果 `setup.dependency_install.skipped=true`，必须说明项目依赖未安装，mypy 类型检查和 pip-audit 依赖解析可能不是完整项目环境。
+- 如果 `setup.dependency_install.skipped=true`，也必须说明 deptry 的传递依赖判断可能不完整。
+- 如果 `tools.deptry.available=false` 或缺少有效结果，不要声称已经完成未使用依赖/缺失依赖检查。
 - 不联网查询时，不要声称某包的最新版本；联网查询也只能作为补充证据，不要把搜索摘要当作完整版本数据库。
 - 没有 pip-audit、官方公告或明确网页证据时，不要写具体 CVE 编号。
 - internet_search 的摘要只能作为公开资料线索，不等同于已验证漏洞扫描结果。

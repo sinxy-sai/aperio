@@ -147,8 +147,16 @@ code_health:
       - mypy
       - bandit
       - pip-audit
-    schema: code-health-tools-v2
+      - pytest
+      - coverage
+      - deptry
+      - interrogate
+    schema: code-health-tools-v3
     install_project_deps_default: false
+    mypy_default_mode: lightweight_ignore_missing_imports
+    mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
+    pytest_coverage_limitation: "pytest and coverage depend on discovered tests and installed project dependencies"
+    deptry_limitation: "without installed project dependencies, transitive dependency analysis can be incomplete"
     raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts
@@ -197,6 +205,10 @@ def print_sandbox_tool_debug(sandbox: "AgentDockerSandbox") -> None:
         "mypy": "mypy --version",
         "bandit": "bandit --version",
         "pip-audit": "pip-audit --version",
+        "pytest": "python -m pytest --version",
+        "coverage": "python -m coverage --version",
+        "deptry": "deptry --version",
+        "interrogate": "interrogate --version",
     }
     for name, command in commands.items():
         output, exit_code = sandbox._sandbox.execute(command)
@@ -648,6 +660,34 @@ def _optional_command(
     return result
 
 
+def _optional_python_module(
+    sandbox: AgentDockerSandbox,
+    module: str,
+    args: str,
+    cwd: str = SANDBOX_PROJECT_ROOT,
+    timeout_hint: str = "",
+    max_output: int = 20000,
+    timeout_seconds: int | None = None,
+) -> dict:
+    """Run an optional Python module command inside the Docker sandbox."""
+    check_cmd = (
+        "python -c "
+        + shlex.quote(f"import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module!r}) else 1)")
+    )
+    _, found = sandbox._sandbox.execute(check_cmd)
+    command = f"python -m {module} {args}".strip()
+    if found != 0:
+        return {"available": False, "command": command, "cwd": cwd, "reason": "python module not installed"}
+    return _optional_command(
+        sandbox,
+        command,
+        cwd=cwd,
+        timeout_hint=timeout_hint,
+        max_output=max_output,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _discover_project_files(sandbox: AgentDockerSandbox, target: str) -> dict:
     code = r'''
 import json
@@ -655,6 +695,7 @@ from pathlib import Path
 
 project_root = Path("PROJECT_ROOT_PLACEHOLDER")
 target = Path("TARGET_PLACEHOLDER")
+test_names = {"tests", "test", "__tests__"}
 dependency_names = {
     "pyproject.toml",
     "requirements.txt",
@@ -669,19 +710,96 @@ result = {
     "target": str(target),
     "target_exists": target.exists(),
     "python_files": [],
+    "test_files": [],
+    "test_support_files": [],
     "dependency_files": [],
+    "readme_files": [],
 }
 if target.exists():
     result["python_files"] = [str(path) for path in sorted(target.rglob("*.py"))]
 if project_root.exists():
+    result["test_files"] = [
+        str(path)
+        for path in sorted(project_root.rglob("*.py"))
+        if path.name.startswith("test_")
+        or path.name.endswith("_test.py")
+    ]
+    result["test_support_files"] = [
+        str(path)
+        for path in sorted(project_root.rglob("*.py"))
+        if any(part in test_names for part in path.parts)
+        and not (path.name.startswith("test_") or path.name.endswith("_test.py"))
+    ]
     result["dependency_files"] = [
         str(path)
         for path in sorted(project_root.rglob("*"))
         if path.is_file() and path.name in dependency_names
     ]
+    result["readme_files"] = [
+        str(path)
+        for path in sorted(project_root.rglob("*"))
+        if path.is_file() and path.name.lower().startswith("readme")
+    ]
 print(json.dumps(result, ensure_ascii=False))
 '''.replace("PROJECT_ROOT_PLACEHOLDER", SANDBOX_PROJECT_ROOT).replace("TARGET_PLACEHOLDER", target)
     return _run_sandbox_json(sandbox, code)
+
+
+def _coverage_json_result(sandbox: AgentDockerSandbox) -> dict:
+    raw = _run_sandbox_json(
+        sandbox,
+        r'''
+import json
+from pathlib import Path
+
+path = Path(".coverage.json")
+if not path.exists():
+    print(json.dumps({"ok": False, "reason": ".coverage.json was not generated"}, ensure_ascii=False))
+else:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    totals = data.get("totals", {})
+    files = data.get("files", {})
+    print(json.dumps(
+        {
+            "ok": True,
+            "totals": totals,
+            "file_count": len(files),
+            "lowest_coverage_files": sorted(
+                [
+                    {
+                        "file": name,
+                        "percent_covered": details.get("summary", {}).get("percent_covered"),
+                        "missing_lines": details.get("summary", {}).get("missing_lines"),
+                    }
+                    for name, details in files.items()
+                ],
+                key=lambda item: item["percent_covered"] if item["percent_covered"] is not None else 101,
+            )[:10],
+        },
+        ensure_ascii=False,
+    ))
+''',
+    )
+    return raw
+
+
+def _read_sandbox_json_file(sandbox: AgentDockerSandbox, file_path: str) -> dict:
+    return _run_sandbox_json(
+        sandbox,
+        f'''
+import json
+from pathlib import Path
+
+path = Path({file_path!r})
+if not path.exists():
+    print(json.dumps({{"ok": False, "reason": f"{{path}} was not generated"}}, ensure_ascii=False))
+else:
+    try:
+        print(json.dumps({{"ok": True, "data": json.loads(path.read_text(encoding="utf-8"))}}, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({{"ok": False, "reason": str(exc)}}, ensure_ascii=False))
+''',
+    )
 
 
 def _skipped_command(command: str, reason: str) -> dict:
@@ -860,10 +978,10 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
             "system_prompt": f"""{language_rule}
 
 你是代码架构师。分析 `{target}` 的架构：
-- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.python_files、tools.ruff、tools.mypy 的事实
+- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.python_files、tools.ruff、tools.mypy、tools.deptry 的事实
 - 如果 coverage_notes.mypy_mode=lightweight_ignore_missing_imports，必须说明 mypy 是轻量模式，结论不能等同完整 CI 类型检查
 - 目录结构是否合理、模块粒度是否合适
-- 是否存在循环依赖、God Class
+- 是否存在明显 import 问题、循环依赖风险、God Class
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
@@ -889,8 +1007,9 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
             "system_prompt": f"""{language_rule}
 
 你是依赖管理专家。检查 `{target}` 的依赖：
-- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit 的事实
+- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit、tools.deptry 的事实
 - 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
+- 使用 tools.deptry 判断未使用依赖、缺失依赖、传递依赖使用问题；如果 deptry 不可用或报错，必须说明未覆盖
 - 默认不要联网逐包查询版本；只有 pip-audit 结果不足且确实需要公开公告补充时，最多调用 1 次 internet_search 做聚合查询，并将证据保存到 {ws}/raw/web_search/dependency-advisories.json；不能把搜索摘要当作已验证 CVE，具体漏洞仍以 pip-audit 或明确官方公告为准
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
@@ -904,8 +1023,8 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
             "system_prompt": f"""{language_rule}
 
 你是技术文档专家。评估 `{target}` 的文档：
-- 先读取 {ws}/raw/tool_results.json，使用 discovery.python_files 明确实际扫描范围
-- 文档/docstring 覆盖需要通过 read_file 阅读代码判断；不要声称已有自动 docstring 覆盖统计
+- 先读取 {ws}/raw/tool_results.json，使用 discovery.python_files 和 tools.interrogate 明确实际扫描范围与 docstring 覆盖
+- 文档/docstring 覆盖优先引用 tools.interrogate；必要时再通过 read_file 阅读关键代码补充判断
 - README 完整性、公开 API docstring 覆盖率
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
@@ -922,7 +1041,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 2. ls {ws}/drafts/ 发现所有分析报告
 3. read_file 逐个读取
 4. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
-5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况、mypy 轻量模式限制和置信度
+5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况、pytest/coverage 覆盖、mypy 轻量模式限制和置信度
 6. 必须调用 write_file 工具，将最终报告以 Markdown 写入这个唯一最终路径：{ws}/code_health_report.md
 
 报告使用中文 Markdown，包含执行摘要和趋势对比（如有历史数据）。
@@ -1096,8 +1215,8 @@ def main():
         """Host-side wrapper that runs code-health commands inside Docker and saves JSON results.
 
         This tool function itself executes in the local Python process. Only the
-        ruff/mypy/bandit/pip-audit commands it launches run inside the Docker
-        sandbox.
+        ruff/mypy/bandit/pip-audit/pytest/coverage/deptry/interrogate commands
+        it launches run inside the Docker sandbox.
         """
         target_rel = _relative_sandbox_path(target)
         if target_rel in code_health_check_cache:
@@ -1105,6 +1224,7 @@ def main():
 
         discovery = _discover_project_files(sandbox, target)
         dependency_files = discovery.get("dependency_files", [])
+        test_files = discovery.get("test_files", [])
 
         if INSTALL_PROJECT_DEPS:
             dependency_install = _optional_command(
@@ -1132,8 +1252,74 @@ def main():
                 "no dependency manifest found under the sandbox project root",
             )
 
+        if test_files:
+            pytest_result = _optional_python_module(
+                sandbox,
+                "pytest",
+                "--maxfail=20 --disable-warnings -q",
+                max_output=30000,
+                timeout_seconds=120,
+            )
+            if pytest_result.get("available") and pytest_result.get("exit_code") in (0, 1):
+                coverage_run = _optional_python_module(
+                    sandbox,
+                    "coverage",
+                    "run -m pytest --maxfail=20 --disable-warnings -q",
+                    max_output=30000,
+                    timeout_seconds=180,
+                )
+                if coverage_run.get("available"):
+                    coverage_json = _optional_python_module(
+                        sandbox,
+                        "coverage",
+                        "json -o .coverage.json",
+                        max_output=12000,
+                        timeout_seconds=60,
+                    )
+                    coverage_result = {
+                        "available": coverage_run.get("available", False),
+                        "command": "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q && python -m coverage json -o .coverage.json",
+                        "cwd": SANDBOX_PROJECT_ROOT,
+                        "run": coverage_run,
+                        "json_export": coverage_json,
+                        "summary": _coverage_json_result(sandbox),
+                        "note": "Coverage reflects the discovered pytest suite only; import failures or missing project dependencies can make it incomplete.",
+                    }
+                else:
+                    coverage_result = coverage_run
+            else:
+                coverage_result = _skipped_command(
+                    "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
+                    "pytest was unavailable or failed before coverage could be collected",
+                )
+        else:
+            pytest_result = _skipped_command(
+                "python -m pytest --maxfail=20 --disable-warnings -q",
+                "no pytest test files discovered under the sandbox project root",
+            )
+            coverage_result = _skipped_command(
+                "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
+                "no pytest test files discovered under the sandbox project root",
+            )
+
+        deptry_result = _optional_command(
+            sandbox,
+            "deptry . --json-output .deptry.json",
+            max_output=30000,
+            timeout_seconds=90,
+        )
+        if deptry_result.get("available"):
+            deptry_result["json_file"] = _read_sandbox_json_file(sandbox, ".deptry.json")
+
+        interrogate_result = _optional_command(
+            sandbox,
+            f"interrogate --fail-under=0 --verbose {shlex.quote(target_rel)}",
+            max_output=20000,
+            timeout_seconds=60,
+        )
+
         tool_results = {
-            "schema_version": "code-health-tools-v2",
+            "schema_version": "code-health-tools-v3",
             "project_root": SANDBOX_PROJECT_ROOT,
             "target": target,
             "target_rel": target_rel,
@@ -1146,6 +1332,16 @@ def main():
                 ),
                 "dependency_install_default": "disabled",
                 "dependency_install_enable": "set APERIO_INSTALL_PROJECT_DEPS=1",
+                "pytest_coverage_limitation": (
+                    "pytest and coverage use the discovered project test suite. If project "
+                    "dependencies are not installed, import failures can make test and coverage "
+                    "results incomplete."
+                ),
+                "deptry_limitation": (
+                    "deptry can read dependency declarations from project manifests, but "
+                    "transitive dependency analysis can be incomplete when project dependencies "
+                    "are not installed in the disposable container."
+                ),
             },
             "discovery": discovery,
             "setup": {
@@ -1166,6 +1362,10 @@ def main():
                     max_output=30000,
                 ),
                 "pip_audit": pip_audit,
+                "pytest": pytest_result,
+                "coverage": coverage_result,
+                "deptry": deptry_result,
+                "interrogate": interrogate_result,
             },
         }
         output_path = run_root / "code_health" / "raw" / "tool_results.json"
@@ -1177,6 +1377,7 @@ def main():
             "target": target,
             "mypy_mode": tool_results["coverage_notes"]["mypy_mode"],
             "python_files": len(discovery.get("python_files", [])),
+            "test_files": len(test_files),
             "dependency_files": dependency_files,
             "dependency_install_exit_code": dependency_install.get("exit_code"),
             "tools_available": {
@@ -1353,7 +1554,7 @@ def main():
 1. 使用 write_todos 规划任务
 2. 调用 run_code_health_checks 工具扫描 {SANDBOX_TARGET_CODE}，工具结果会写入 {code_ws}/raw/tool_results.json
 3. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-4. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
+4. 必须使用 task 工具并行派发 4 个已声明子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
@@ -1369,6 +1570,8 @@ def main():
 - internet_search 是只读联网工具，只能作为公开资料补充；代码事实、扫描结论和最终风险判定必须优先来自本地代码、{code_ws}/raw/tool_results.json 和草稿报告
 - 如果引用 internet_search 结果，必须明确标注其为公开网络证据，并保留链接；联网失败时不要编造公开资料
 - 必须先得到这 4 个草稿文件：{code_ws}/drafts/architect.md、{code_ws}/drafts/security.md、{code_ws}/drafts/dependencies.md、{code_ws}/drafts/documentation.md
+- 这 4 个草稿必须由对应叶子子代理写入；code-health-orchestrator 自己不得调用 write_file 代写 {code_ws}/drafts/*.md
+- 派发子代理时必须使用这些精确名称：architect、security-analyst、dependency-checker、doc-reviewer；不要创建临时分析角色、不要把多个维度合并给同一个子代理
 - 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
 - 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
 - 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",

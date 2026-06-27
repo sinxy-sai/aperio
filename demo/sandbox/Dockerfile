@@ -9,6 +9,10 @@ RUN python -m pip install --upgrade pip setuptools wheel \
         "ruff>=0.2.2,<1.0.0" \
         "mypy>=1.8,<2.0" \
         "bandit>=1.7,<2.0" \
-        "pip-audit>=2.7,<3.0"
+        "pip-audit>=2.7,<3.0" \
+        "pytest>=8.0,<9.0" \
+        "coverage>=7.4,<8.0" \
+        "deptry>=0.16,<1.0" \
+        "interrogate>=1.7,<2.0"
 
 WORKDIR /workspace
