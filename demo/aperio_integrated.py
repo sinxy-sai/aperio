@@ -704,10 +704,19 @@ class Metrics:
     tokens_out: int = 0
     events: list = field(default_factory=list)
     by_thread: dict = field(default_factory=dict)
+    by_agent: dict = field(default_factory=dict)
+    by_agent_thread: dict = field(default_factory=dict)
 
     def record_thread(self, thread_id: str, kind: str) -> None:
         bucket = self.by_thread.setdefault(thread_id, {"model": 0, "tool": 0})
         bucket[kind] = bucket.get(kind, 0) + 1
+
+    def record_agent(self, agent_name: str, thread_id: str, kind: str) -> None:
+        agent_bucket = self.by_agent.setdefault(agent_name, {"model": 0, "tool": 0})
+        agent_bucket[kind] = agent_bucket.get(kind, 0) + 1
+        key = f"{thread_id}::{agent_name}"
+        scoped_bucket = self.by_agent_thread.setdefault(key, {"model": 0, "tool": 0})
+        scoped_bucket[kind] = scoped_bucket.get(kind, 0) + 1
 
     def to_dict(self) -> dict:
         return {
@@ -717,6 +726,8 @@ class Metrics:
             "tool_avg_ms": round(self.tool_time_ms / max(1, self.tool_calls), 1),
             "total_tokens": self.tokens_in + self.tokens_out,
             "by_thread": self.by_thread,
+            "by_agent": self.by_agent,
+            "by_agent_thread": self.by_agent_thread,
             "events": self.events,
         }
 
@@ -724,9 +735,10 @@ class Metrics:
 class PerfMiddleware(AgentMiddleware):
     """Custom performance middleware — tracks model calls, tool calls, tokens, timing."""
 
-    def __init__(self, m: Metrics, verbose: bool = True):
+    def __init__(self, m: Metrics, agent_name: str, verbose: bool = True):
         super().__init__()
         self.m = m
+        self.agent_name = agent_name
         self.verbose = verbose
 
     @staticmethod
@@ -759,6 +771,7 @@ class PerfMiddleware(AgentMiddleware):
         self.m.model_calls += 1
         thread_id = self._thread_id(request)
         self.m.record_thread(thread_id, "model")
+        self.m.record_agent(self.agent_name, thread_id, "model")
         t0 = time.perf_counter()
         try:
             response = handler(request)
@@ -776,10 +789,10 @@ class PerfMiddleware(AgentMiddleware):
                 self.m.tokens_in += usage.get("input_tokens", 0)
                 self.m.tokens_out += usage.get("output_tokens", 0)
 
-            event = {"type": "model", "thread_id": thread_id, "ms": round(dt, 1)}
+            event = {"type": "model", "agent": self.agent_name, "thread_id": thread_id, "ms": round(dt, 1)}
             self.m.events.append(event)
             if self.verbose:
-                print(f"[debug] model_call thread={thread_id} ms={event['ms']}")
+                print(f"[debug] model_call agent={self.agent_name} thread={thread_id} ms={event['ms']}")
             return response
         except Exception:
             raise
@@ -788,28 +801,41 @@ class PerfMiddleware(AgentMiddleware):
         self.m.tool_calls += 1
         thread_id = self._thread_id(request)
         self.m.record_thread(thread_id, "tool")
+        self.m.record_agent(self.agent_name, thread_id, "tool")
         t0 = time.perf_counter()
         tool_name = self._tool_name(request)
         try:
             result = handler(request)
             dt = (time.perf_counter() - t0) * 1000
             self.m.tool_time_ms += dt
-            event = {"type": "tool", "thread_id": thread_id, "name": tool_name, "ms": round(dt, 1)}
+            event = {
+                "type": "tool",
+                "agent": self.agent_name,
+                "thread_id": thread_id,
+                "name": tool_name,
+                "ms": round(dt, 1),
+            }
             self.m.events.append(event)
             if self.verbose:
-                print(f"[debug] tool_call thread={thread_id} tool={tool_name} ms={event['ms']}")
+                print(f"[debug] tool_call agent={self.agent_name} thread={thread_id} tool={tool_name} ms={event['ms']}")
             return result
         except Exception as exc:
-            event = {"type": "tool_error", "thread_id": thread_id, "name": tool_name, "error": type(exc).__name__}
+            event = {
+                "type": "tool_error",
+                "agent": self.agent_name,
+                "thread_id": thread_id,
+                "name": tool_name,
+                "error": type(exc).__name__,
+            }
             self.m.events.append(event)
             if self.verbose:
-                print(f"[debug] tool_error thread={thread_id} tool={tool_name} error={type(exc).__name__}")
+                print(f"[debug] tool_error agent={self.agent_name} thread={thread_id} tool={tool_name} error={type(exc).__name__}")
             raise
 
 
-def _perf_middleware(metrics: Metrics) -> list[AgentMiddleware]:
+def _perf_middleware(metrics: Metrics, agent_name: str) -> list[AgentMiddleware]:
     """Create a fresh performance middleware list sharing one metrics sink."""
-    return [PerfMiddleware(metrics)]
+    return [PerfMiddleware(metrics, agent_name=agent_name)]
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +859,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.architect"),
         },
         {
             "name": "security-analyst",
@@ -847,7 +873,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 敏感端点认证缺失
 将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-security")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.security-analyst"),
         },
         {
             "name": "dependency-checker",
@@ -862,7 +888,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.dependency-checker"),
         },
         {
             "name": "doc-reviewer",
@@ -876,7 +902,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.doc-reviewer"),
         },
         {
             "name": "summarizer",
@@ -901,7 +927,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("code-health/report-writing")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.summarizer"),
         },
     ]
 
@@ -919,7 +945,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.product-strategist"),
         },
         {
             "name": "technical-feasibility",
@@ -930,7 +956,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 是否有安全隐患
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility"),
         },
         {
             "name": "ux-researcher",
@@ -940,7 +966,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 交互一致性、无障碍、信息架构
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.ux-researcher"),
         },
         {
             "name": "risk-analyst",
@@ -950,7 +976,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 数据隐私合规、用户采纳障碍
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-test")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.risk-analyst"),
         },
         {
             "name": "editor",
@@ -973,7 +999,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
-            "middleware": _perf_middleware(metrics),
+            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.editor"),
         },
     ]
 
@@ -1266,7 +1292,7 @@ def main():
 
     # ---- Middleware ----
     metrics = Metrics()
-    perf = PerfMiddleware(metrics)
+    perf = PerfMiddleware(metrics, agent_name="root")
     user_middleware: list[AgentMiddleware] = [
         ModelCallLimitMiddleware(
             run_limit=100,
@@ -1297,7 +1323,7 @@ def main():
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
         "skills": _agent_skills(),
-        "middleware": _perf_middleware(metrics),
+        "middleware": _perf_middleware(metrics, "root.code-health-orchestrator"),
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
@@ -1328,22 +1354,24 @@ def main():
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
         "skills": _agent_skills(),
-        "middleware": _perf_middleware(metrics),
+        "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator"),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-2. 根据用户需求，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
+2. 作为 Writer，必须先调用 internet_search 检索目标产品相关的公开竞品、校园导航/室内导航/AR 导航/校园服务公开实践，并将原始搜索证据保存到 {prd_ws}/raw/web_search/writer-research.json
+3. 根据用户需求和联网证据，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
    包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
-3. 并行派发 4 个评审子代理：
+4. PRD 初稿中引用联网信息时必须标注“公开网络证据”，但不要把搜索摘要当作用户已经确认的需求
+5. 并行派发 4 个评审子代理：
    - product-strategist：产品策略
    - technical-feasibility：技术可行性
    - ux-researcher：用户体验
    - risk-analyst：风险评估
    每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
-4. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
-5. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
-6. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
-7. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
+6. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
+7. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
+8. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
+9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
 
 PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws, metrics),
