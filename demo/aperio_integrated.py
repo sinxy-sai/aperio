@@ -63,6 +63,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_core.tools import tool
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
@@ -166,6 +167,20 @@ def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> No
                 continue
             for skill in skills:
                 print(f"      loaded {skill['name']} -> {skill['path']}")
+
+
+def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
+    custom_tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in custom_tools]
+    print("\n[debug] Tools")
+    print("  built-in: write_todos, task, ls, read_file, write_file, edit_file, glob, grep, execute")
+    print(f"  custom: {custom_tool_names or '[]'}")
+    print("  inheritance: declared subagents without a tools field inherit the main agent tool set.")
+    for name, spec in _collect_subagents(subagents):
+        if "tools" in spec:
+            tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in spec["tools"]]
+            print(f"  - {name}: tools={tool_names} [override]")
+        else:
+            print(f"  - {name}: tools=inherited + custom={custom_tool_names or '[]'}")
 
 
 def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
@@ -449,6 +464,36 @@ class AgentDockerSandbox(SandboxBackendProtocol):
         self._sandbox.close()
 
 
+def _run_sandbox_json(sandbox: AgentDockerSandbox, code: str) -> dict:
+    command = "python -c " + shlex.quote(code)
+    output, exit_code = sandbox._sandbox.execute(command)
+    if exit_code != 0:
+        return {"ok": False, "exit_code": exit_code, "error": output.strip()}
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        return {"ok": False, "exit_code": exit_code, "error": output.strip()}
+
+
+def _optional_command(sandbox: AgentDockerSandbox, command: str, timeout_hint: str = "") -> dict:
+    check_cmd = "command -v " + shlex.quote(command.split()[0]) + " >/dev/null 2>&1"
+    _, found = sandbox._sandbox.execute(check_cmd)
+    if found != 0:
+        return {"available": False, "reason": "command not installed"}
+    output, exit_code = sandbox._sandbox.execute(command)
+    return {
+        "available": True,
+        "exit_code": exit_code,
+        "output": output[:12000],
+        "note": timeout_hint,
+    }
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Middleware (M6: Observability)
 # ---------------------------------------------------------------------------
@@ -577,53 +622,59 @@ def _code_health_subagents(ws: str, target: str) -> list:
             "name": "architect",
             "description": "Analyze code architecture: directory structure, module coupling, layering",
             "system_prompt": f"""你是代码架构师。分析 `{target}` 的架构：
+- 先读取 {ws}/raw/tool_results.json，优先引用其中的文件清单、imports、复杂度统计
 - 目录结构是否合理、模块粒度是否合适
 - 是否存在循环依赖、God Class
 - 分层是否清晰（API → 业务 → 数据）
-将分析结果写入 {ws}/drafts/architect.md，最后输出中文摘要。""",
+将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": [_skill_dir("code-health/code-architect")],
         },
         {
             "name": "security-analyst",
             "description": "Audit code for vulnerabilities: SQL injection, XSS, hardcoded secrets, OWASP Top-10",
             "system_prompt": f"""你是应用安全工程师。审计 `{target}` 的安全：
+- 先读取 {ws}/raw/tool_results.json，优先引用 security_grep、bandit、pip-audit 结果
 - SQL 注入、XSS、硬编码密钥
 - 不安全反序列化、路径遍历
 - 敏感端点认证缺失
-将分析结果写入 {ws}/drafts/security.md，最后输出中文摘要。""",
+将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": [_skill_dir("code-health/code-security")],
         },
         {
             "name": "dependency-checker",
             "description": "Check dependencies: outdated versions, CVEs, license compatibility",
             "system_prompt": f"""你是依赖管理专家。检查 `{target}` 的依赖：
+- 先读取 {ws}/raw/tool_results.json，优先引用 dependency_files 和 pip-audit 结果
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
-将分析结果写入 {ws}/drafts/dependencies.md，最后输出中文摘要。""",
+将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": [_skill_dir("code-health/code-dependency")],
         },
         {
             "name": "doc-reviewer",
             "description": "Review documentation: README, docstrings, API docs coverage",
             "system_prompt": f"""你是技术文档专家。评估 `{target}` 的文档：
+- 先读取 {ws}/raw/tool_results.json，优先引用 docstrings 和复杂度统计
 - README 完整性、公开 API docstring 覆盖率
 - 注释质量、配置说明
-将分析结果写入 {ws}/drafts/documentation.md，最后输出中文摘要。""",
+将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": [_skill_dir("code-health/code-documentation")],
         },
         {
             "name": "summarizer",
             "description": "Merge 4 analysis reports into a consolidated code health report",
             "system_prompt": f"""你是报告汇总专家。任务：
-1. ls {ws}/drafts/ 发现所有分析报告
-2. read_file 逐个读取
-3. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
-4. 计算健康度评分（0-100）
-5. 必须调用 write_file 工具，将最终报告写入这个唯一最终路径：{ws}/code_health_report.md
+1. read_file 读取 {ws}/raw/tool_results.json
+2. ls {ws}/drafts/ 发现所有分析报告
+3. read_file 逐个读取
+4. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
+5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况和置信度
+6. 必须调用 write_file 工具，将最终报告以 Markdown 写入这个唯一最终路径：{ws}/code_health_report.md
 
-报告使用中文，包含执行摘要和趋势对比（如有历史数据）。
+报告使用中文 Markdown，包含执行摘要和趋势对比（如有历史数据）。
 最终输出契约：
 - 最终报告只能写入 {ws}/code_health_report.md
+- 最终报告必须是 Markdown，不要生成 HTML、JSON、CSS、JS 或可视化网页
 - 不要写入 /outputs/code_health_report.md、/outputs/core_code_health_report.md 或其他根级别文件名
 - 不要写入 {ws}/drafts/merged-report.md 作为最终报告；drafts 目录只保存中间草稿
 - 调用 write_file 成功写入 {ws}/code_health_report.md 后立即结束任务
@@ -774,6 +825,109 @@ def main():
         ),
     ]
 
+    @tool
+    def run_code_health_checks(target: str = SANDBOX_TARGET_CODE) -> str:
+        """Run deterministic code-health checks in the Docker sandbox and save JSON results."""
+        analysis_code = r'''
+import ast
+import compileall
+import json
+import os
+from pathlib import Path
+
+target = Path("TARGET_PLACEHOLDER")
+result = {
+    "target": str(target),
+    "exists": target.exists(),
+    "python_files": [],
+    "compile": {"ok": None},
+    "imports": {},
+    "docstrings": {"public_defs": 0, "missing": []},
+    "complexity": {"functions_over_50_lines": [], "files_over_500_lines": []},
+    "security_grep": [],
+    "dependency_files": [],
+}
+if not target.exists():
+    print(json.dumps(result, ensure_ascii=False))
+    raise SystemExit(0)
+
+py_files = sorted(target.rglob("*.py"))
+result["python_files"] = [str(p) for p in py_files]
+result["compile"]["ok"] = compileall.compile_dir(str(target), quiet=1)
+
+for name in ("pyproject.toml", "requirements.txt", "requirements-dev.txt", "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock"):
+    for p in target.rglob(name):
+        result["dependency_files"].append(str(p))
+
+secret_markers = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY", "API_KEY")
+for path in py_files:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        continue
+    lines = text.splitlines()
+    if len(lines) > 500:
+        result["complexity"]["files_over_500_lines"].append({"path": str(path), "lines": len(lines)})
+    for lineno, line in enumerate(lines, 1):
+        upper = line.upper()
+        if any(marker in upper for marker in secret_markers) and "=" in line and not line.strip().startswith("#"):
+            result["security_grep"].append({"path": str(path), "line": lineno, "text": line.strip()[:240]})
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        result.setdefault("syntax_errors", []).append({"path": str(path), "line": exc.lineno, "message": exc.msg})
+        continue
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if not node.name.startswith("_"):
+                result["docstrings"]["public_defs"] += 1
+                if ast.get_docstring(node) is None:
+                    result["docstrings"]["missing"].append({"path": str(path), "line": node.lineno, "name": node.name})
+            end = getattr(node, "end_lineno", node.lineno)
+            length = end - node.lineno + 1
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and length > 50:
+                result["complexity"]["functions_over_50_lines"].append({
+                    "path": str(path),
+                    "line": node.lineno,
+                    "name": node.name,
+                    "lines": length,
+                })
+    result["imports"][str(path)] = sorted(set(imports))
+
+print(json.dumps(result, ensure_ascii=False))
+'''.replace("TARGET_PLACEHOLDER", target)
+        stdlib_result = _run_sandbox_json(sandbox, analysis_code)
+        tool_results = {
+            "target": target,
+            "standard_library_analysis": stdlib_result,
+            "optional_tools": {
+                "ruff": _optional_command(sandbox, f"ruff check {shlex.quote(target)} --output-format json"),
+                "mypy": _optional_command(sandbox, f"mypy {shlex.quote(target)} --hide-error-context --no-error-summary"),
+                "bandit": _optional_command(sandbox, f"bandit -r {shlex.quote(target)} -f json"),
+                "pip_audit": _optional_command(sandbox, "pip-audit --format json"),
+            },
+        }
+        output_path = run_root / "code_health" / "raw" / "tool_results.json"
+        _write_json(output_path, tool_results)
+        summary = {
+            "saved_to": "/outputs/code_health/raw/tool_results.json",
+            "analysis_ok": stdlib_result.get("ok", True),
+            "python_files": len(stdlib_result.get("python_files", [])),
+            "compile_ok": stdlib_result.get("compile", {}).get("ok"),
+            "missing_docstrings": len(stdlib_result.get("docstrings", {}).get("missing", [])),
+            "secret_like_lines": len(stdlib_result.get("security_grep", [])),
+            "optional_tools_available": {
+                name: data.get("available", False)
+                for name, data in tool_results["optional_tools"].items()
+            },
+        }
+        return json.dumps(summary, ensure_ascii=False)
+
     # ---- Model ----
     primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
     fallback_model_name = os.environ.get("APERIO_FALLBACK_MODEL", "openai:deepseek-v4-flash")
@@ -812,7 +966,7 @@ def main():
         ModelFallbackMiddleware(fallback_model),
         perf,
         ToolRetryMiddleware(
-            tools=["ls", "glob", "grep", "read_file"],
+            tools=["ls", "glob", "grep", "read_file", "run_code_health_checks"],
             max_retries=2,
             initial_delay=0.5,
             max_delay=2.0,
@@ -830,17 +984,18 @@ def main():
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
-2. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-3. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}：
+2. 调用 run_code_health_checks 工具扫描 {SANDBOX_TARGET_CODE}，工具结果会写入 {code_ws}/raw/tool_results.json
+3. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
+4. 并行派发 4 个子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
    - doc-reviewer：文档评估
    每个子代理将结果写入 {code_ws}/drafts/
-4. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
-5. summarizer 的唯一最终产物必须是 {code_ws}/code_health_report.md；不要接受 /outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
-6. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
-7. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+5. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
+6. summarizer 的唯一最终产物必须是 Markdown 文件 {code_ws}/code_health_report.md；不要接受 HTML、JSON、/outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
+7. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
+8. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
         "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
     }
     prd_review_orchestrator = {
@@ -866,14 +1021,17 @@ PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws),
     }
     subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
+    custom_tools = [run_code_health_checks]
 
     print_backend_debug(run_root, local_resources, sandbox)
     print_subagent_debug(subagent_specs, backend)
+    print_tool_debug(subagent_specs, custom_tools)
     print_middleware_debug(user_middleware)
 
     # ---- Main Router Agent ----
     agent = create_deep_agent(
         model=model,
+        tools=custom_tools,
         backend=backend,
         checkpointer=checkpointer,
         middleware=user_middleware,
