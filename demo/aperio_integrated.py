@@ -102,6 +102,12 @@ def _shared_skill_dir() -> str:
     return _skill_dir("")
 
 
+def _agent_skills(*sources: str) -> list[str]:
+    """Attach shared skills plus agent-specific skill sources."""
+    ordered = [_shared_skill_dir(), *sources]
+    return list(dict.fromkeys(ordered))
+
+
 def setup_local_resources() -> Path:
     """Create read-only local resources exposed through CompositeBackend."""
     LOCAL_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
@@ -813,7 +819,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 是否存在循环依赖、God Class
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
-            "skills": [_skill_dir("code-health/code-architect")],
+            "skills": _agent_skills(_skill_dir("code-health/code-architect")),
         },
         {
             "name": "security-analyst",
@@ -826,7 +832,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 不安全反序列化、路径遍历
 - 敏感端点认证缺失
 将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
-            "skills": [_skill_dir("code-health/code-security")],
+            "skills": _agent_skills(_skill_dir("code-health/code-security")),
         },
         {
             "name": "dependency-checker",
@@ -840,7 +846,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
-            "skills": [_shared_skill_dir(), _skill_dir("code-health/code-dependency")],
+            "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
         },
         {
             "name": "doc-reviewer",
@@ -853,7 +859,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - README 完整性、公开 API docstring 覆盖率
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
-            "skills": [_skill_dir("code-health/code-documentation")],
+            "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
         },
         {
             "name": "summarizer",
@@ -877,7 +883,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 调用 write_file 成功写入 {ws}/code_health_report.md 后立即结束任务
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
-            "skills": [_skill_dir("code-health/report-writing")],
+            "skills": _agent_skills(_skill_dir("code-health/report-writing")),
         },
     ]
 
@@ -894,7 +900,7 @@ def _prd_review_subagents(ws: str) -> list:
 - MVP 功能优先级是否合理
 - 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
-            "skills": [_shared_skill_dir(), _skill_dir("prd-review/review-ops")],
+            "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
         },
         {
             "name": "technical-feasibility",
@@ -904,7 +910,7 @@ def _prd_review_subagents(ws: str) -> list:
 - API 设计是否清晰、性能预期是否合理
 - 是否有安全隐患
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
-            "skills": [_skill_dir("prd-review/review-tech")],
+            "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
         },
         {
             "name": "ux-researcher",
@@ -913,7 +919,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 用户操作路径是否最短、异常状态是否覆盖
 - 交互一致性、无障碍、信息架构
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
-            "skills": [_skill_dir("prd-review/review-ux")],
+            "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
         },
         {
             "name": "risk-analyst",
@@ -922,7 +928,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 时间线和资源风险、团队能力匹配
 - 数据隐私合规、用户采纳障碍
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
-            "skills": [_skill_dir("prd-review/review-test")],
+            "skills": _agent_skills(_skill_dir("prd-review/review-test")),
         },
         {
             "name": "editor",
@@ -944,7 +950,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 调用 write_file 成功写入上述两个标准文件后立即结束任务
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
-            "skills": [_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")],
+            "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
         },
     ]
 
@@ -1267,6 +1273,7 @@ def main():
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
+        "skills": _agent_skills(),
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
@@ -1296,6 +1303,7 @@ def main():
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
+        "skills": _agent_skills(),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
@@ -1332,6 +1340,7 @@ PRD 使用中文撰写。""",
         checkpointer=checkpointer,
         middleware=user_middleware,
         permissions=permissions,
+        skills=_agent_skills(),
         interrupt_on={
             "execute": {"allowed_decisions": ["approve", "reject"]},
             "write_file": {"allowed_decisions": ["approve", "reject"]},
