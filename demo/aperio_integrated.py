@@ -885,7 +885,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 你是依赖管理专家。检查 `{target}` 的依赖：
 - 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit 的事实
 - 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
-- 可以按 web-search skill 使用 internet_search 查询公开依赖生态信息，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；不能把搜索摘要当作已验证 CVE，具体漏洞仍以 pip-audit 或明确官方公告为准
+- 默认不要联网逐包查询版本；只有 pip-audit 结果不足且确实需要公开公告补充时，最多调用 1 次 internet_search 做聚合查询，并将证据保存到 {ws}/raw/web_search/dependency-advisories.json；不能把搜索摘要当作已验证 CVE，具体漏洞仍以 pip-audit 或明确官方公告为准
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
@@ -1391,7 +1391,7 @@ PRD 使用中文撰写。""",
         middleware=code_health_orchestrator["middleware"],
         permissions=permissions,
         skills=code_health_orchestrator["skills"],
-        interrupt_on=root_interrupt_on,
+        interrupt_on=None,
         system_prompt=code_health_orchestrator["system_prompt"],
         subagents=code_health_orchestrator["subagents"],
         name=code_health_orchestrator["name"],
@@ -1404,7 +1404,7 @@ PRD 使用中文撰写。""",
         middleware=prd_review_orchestrator["middleware"],
         permissions=permissions,
         skills=prd_review_orchestrator["skills"],
-        interrupt_on=root_interrupt_on,
+        interrupt_on=None,
         system_prompt=prd_review_orchestrator["system_prompt"],
         subagents=prd_review_orchestrator["subagents"],
         name=prd_review_orchestrator["name"],
