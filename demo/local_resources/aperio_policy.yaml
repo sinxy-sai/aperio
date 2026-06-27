@@ -19,6 +19,14 @@ code_health:
   source_path: /workspace/code
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
+  toolchain:
+    image: aperio-sandbox:py311-tools
+    preinstalled:
+      - ruff
+      - mypy
+      - bandit
+      - pip-audit
+    raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts
   prd_v1: /outputs/prd_review/prd_v1.md

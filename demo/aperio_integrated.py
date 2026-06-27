@@ -84,6 +84,9 @@ SKILLS_DIR = _DEMO_DIR / "04_skills"
 LOCAL_RESOURCES_DIR = _DEMO_DIR / "local_resources"
 TARGET_CODE = "full-stack-fastapi-template-master/backend/app/core"
 SANDBOX_TARGET_CODE = "/workspace/code"
+DEFAULT_SANDBOX_IMAGE = "aperio-sandbox:py311-tools"
+SANDBOX_IMAGE = os.environ.get("APERIO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
+SANDBOX_DOCKERFILE = (_DEMO_DIR / "sandbox" / "Dockerfile").resolve()
 
 
 def _skill_dir(name: str) -> str:
@@ -118,6 +121,14 @@ code_health:
   source_path: /workspace/code
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
+  toolchain:
+    image: aperio-sandbox:py311-tools
+    preinstalled:
+      - ruff
+      - mypy
+      - bandit
+      - pip-audit
+    raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts
   prd_v1: /outputs/prd_review/prd_v1.md
@@ -143,12 +154,28 @@ def _collect_subagents(subagents: list[dict], parent: str = "root") -> list[tupl
 
 def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDockerSandbox") -> None:
     print("\n[debug] CompositeBackend routes")
-    print(f"  default: DockerSandbox container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
+    print(f"  default: DockerSandbox image={sandbox.image} container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
     print(f"  /outputs/ -> FilesystemBackend({run_root})")
     print("  /memories/ -> StoreBackend(namespace=aperio)")
     print("  /temp/ -> StateBackend()")
     print(f"  /local-resources/ -> FilesystemBackend({local_resources}) [write denied]")
     print(f"  /skills/ -> FilesystemBackend({SKILLS_DIR})")
+
+
+def print_sandbox_tool_debug(sandbox: "AgentDockerSandbox") -> None:
+    print("\n[debug] Sandbox toolchain")
+    commands = {
+        "python": "python --version",
+        "ruff": "ruff --version",
+        "mypy": "mypy --version",
+        "bandit": "bandit --version",
+        "pip-audit": "pip-audit --version",
+    }
+    for name, command in commands.items():
+        output, exit_code = sandbox._sandbox.execute(command)
+        first_line = output.strip().splitlines()[0] if output.strip() else ""
+        status = "OK" if exit_code == 0 else "MISSING"
+        print(f"  {status:7} {name}: {first_line or 'not available'}")
 
 
 def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> None:
@@ -255,7 +282,7 @@ class DockerSandbox:
 
     def __init__(
         self,
-        image: str = "python:3.11-slim",
+        image: str = SANDBOX_IMAGE,
         working_dir: str = "/workspace",
         remove_on_close: bool = True,
     ):
@@ -268,6 +295,7 @@ class DockerSandbox:
         self.working_dir = working_dir
         self.remove_on_close = remove_on_close
         self.client = docker.from_env()
+        self._ensure_image(docker)
         self.container = self.client.containers.run(
             self.image,
             command="tail -f /dev/null",
@@ -276,6 +304,44 @@ class DockerSandbox:
             remove=self.remove_on_close,
         )
         print(f"Docker sandbox: started {self.container.id[:12]} ({self.image})")
+
+    def _ensure_image(self, docker_module) -> None:
+        try:
+            self.client.images.get(self.image)
+            return
+        except docker_module.errors.ImageNotFound:
+            if self.image != DEFAULT_SANDBOX_IMAGE:
+                raise RuntimeError(
+                    f"Docker image not found: {self.image}. "
+                    "Build or pull it first, or unset APERIO_SANDBOX_IMAGE to use the demo image."
+                )
+            if not SANDBOX_DOCKERFILE.exists():
+                raise RuntimeError(f"sandbox Dockerfile not found: {SANDBOX_DOCKERFILE}")
+
+            print(f"Docker sandbox image not found: {self.image}")
+            print(f"Docker sandbox: building {self.image} from {SANDBOX_DOCKERFILE}")
+            print("Docker sandbox: Docker will pull python:3.11-slim if the base image is missing")
+            try:
+                build_stream = self.client.api.build(
+                    path=str(SANDBOX_DOCKERFILE.parent),
+                    dockerfile=SANDBOX_DOCKERFILE.name,
+                    tag=self.image,
+                    pull=True,
+                    rm=True,
+                    decode=True,
+                )
+                for event in build_stream:
+                    if "error" in event:
+                        raise RuntimeError(event["error"])
+                    text = event.get("stream", "").strip()
+                    if text:
+                        print(f"  {text}")
+            except Exception as exc:
+                raise RuntimeError(f"failed to build sandbox image {self.image}: {exc}") from exc
+
+            self.client.images.get(self.image)
+        except docker_module.errors.APIError as exc:
+            raise RuntimeError(f"failed to inspect Docker image {self.image}: {exc}") from exc
 
     def seed_directory(self, source: Path, destination: str) -> None:
         """Copy host directory into the container as demo input."""
@@ -431,6 +497,10 @@ class AgentDockerSandbox(SandboxBackendProtocol):
     @property
     def id(self) -> str:
         return self._sandbox.container.id if self._sandbox.container else "closed"
+
+    @property
+    def image(self) -> str:
+        return self._sandbox.image
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         output, exit_code = self._sandbox.execute(command)
@@ -1024,6 +1094,7 @@ PRD 使用中文撰写。""",
     custom_tools = [run_code_health_checks]
 
     print_backend_debug(run_root, local_resources, sandbox)
+    print_sandbox_tool_debug(sandbox)
     print_subagent_debug(subagent_specs, backend)
     print_tool_debug(subagent_specs, custom_tools)
     print_middleware_debug(user_middleware)
