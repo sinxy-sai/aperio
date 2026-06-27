@@ -1018,6 +1018,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    code_health_check_cache: dict[str, str] = {}
 
     # ---- LangSmith ----
     # langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY", "")
@@ -1092,8 +1093,16 @@ def main():
 
     @tool
     def run_code_health_checks(target: str = SANDBOX_TARGET_CODE) -> str:
-        """Run code-health tools in the Docker sandbox and save JSON results."""
+        """Host-side wrapper that runs code-health commands inside Docker and saves JSON results.
+
+        This tool function itself executes in the local Python process. Only the
+        ruff/mypy/bandit/pip-audit commands it launches run inside the Docker
+        sandbox.
+        """
         target_rel = _relative_sandbox_path(target)
+        if target_rel in code_health_check_cache:
+            return code_health_check_cache[target_rel]
+
         discovery = _discover_project_files(sandbox, target)
         dependency_files = discovery.get("dependency_files", [])
 
@@ -1179,11 +1188,13 @@ def main():
                 for name, data in tool_results["tools"].items()
             },
         }
-        return json.dumps(summary, ensure_ascii=False)
+        summary_json = json.dumps(summary, ensure_ascii=False)
+        code_health_check_cache[target_rel] = summary_json
+        return summary_json
 
     @tool
     def internet_search(query: str, max_results: int = 3, save_path: str = "") -> str:
-        """Search the public web with DuckDuckGo, optionally saving JSON evidence under /outputs/."""
+        """Host-side public web search with DuckDuckGo, optionally saving JSON evidence under /outputs/."""
         query = (query or "").strip()
         save_path = (save_path or "").strip().replace("\\", "/")
         if not query:
