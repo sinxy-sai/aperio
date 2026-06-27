@@ -230,7 +230,9 @@ def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
     print(f"  custom: {custom_tool_names or '[]'}")
     print("  inheritance: declared subagents without a tools field inherit the main agent tool set.")
     for name, spec in _collect_subagents(subagents):
-        if "tools" in spec:
+        if "runnable" in spec:
+            print(f"  - {name}: tools=preconfigured in compiled runnable [no parent inheritance]")
+        elif "tools" in spec:
             tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in spec["tools"]]
             print(f"  - {name}: tools={tool_names} [override]")
         else:
@@ -1318,6 +1320,11 @@ def main():
             exit_behavior="continue",
         ),
     ]
+    custom_tools = [run_code_health_checks, internet_search]
+    root_interrupt_on = {
+        "execute": {"allowed_decisions": ["approve", "reject"]},
+        "write_file": {"allowed_decisions": ["approve", "reject"]},
+    }
 
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
@@ -1376,8 +1383,33 @@ def main():
 PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws, metrics),
     }
+    code_health_orchestrator["runnable"] = create_deep_agent(
+        model=model,
+        tools=custom_tools,
+        backend=backend,
+        checkpointer=checkpointer,
+        middleware=code_health_orchestrator["middleware"],
+        permissions=permissions,
+        skills=code_health_orchestrator["skills"],
+        interrupt_on=root_interrupt_on,
+        system_prompt=code_health_orchestrator["system_prompt"],
+        subagents=code_health_orchestrator["subagents"],
+        name=code_health_orchestrator["name"],
+    )
+    prd_review_orchestrator["runnable"] = create_deep_agent(
+        model=model,
+        tools=custom_tools,
+        backend=backend,
+        checkpointer=checkpointer,
+        middleware=prd_review_orchestrator["middleware"],
+        permissions=permissions,
+        skills=prd_review_orchestrator["skills"],
+        interrupt_on=root_interrupt_on,
+        system_prompt=prd_review_orchestrator["system_prompt"],
+        subagents=prd_review_orchestrator["subagents"],
+        name=prd_review_orchestrator["name"],
+    )
     subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
-    custom_tools = [run_code_health_checks, internet_search]
 
     print_backend_debug(run_root, local_resources, sandbox)
     print_sandbox_tool_debug(sandbox)
@@ -1395,10 +1427,7 @@ PRD 使用中文撰写。""",
         middleware=user_middleware,
         permissions=permissions,
         skills=_agent_skills(),
-        interrupt_on={
-            "execute": {"allowed_decisions": ["approve", "reject"]},
-            "write_file": {"allowed_decisions": ["approve", "reject"]},
-        },
+        interrupt_on=root_interrupt_on,
         system_prompt="""你是 Aperio 研发质量平台的**任务路由器**。根据用户输入判断任务类型：
 
 - 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
