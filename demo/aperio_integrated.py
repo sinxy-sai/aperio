@@ -1238,8 +1238,14 @@ def main():
                 "python -m pip install --disable-pip-version-check -e .",
                 "disabled by default; set APERIO_INSTALL_PROJECT_DEPS=1 to install project dependencies inside the disposable container",
             )
+        project_deps_ready = dependency_install.get("exit_code") == 0
 
-        if dependency_files:
+        if not project_deps_ready:
+            pip_audit = _skipped_command(
+                "pip-audit . --format json --progress-spinner off",
+                "project dependencies are not installed; skipped to avoid slow or incomplete dependency audit",
+            )
+        elif dependency_files:
             pip_audit = _optional_command(
                 sandbox,
                 "pip-audit . --format json --progress-spinner off",
@@ -1252,7 +1258,16 @@ def main():
                 "no dependency manifest found under the sandbox project root",
             )
 
-        if test_files:
+        if not project_deps_ready:
+            pytest_result = _skipped_command(
+                "python -m pytest --maxfail=20 --disable-warnings -q",
+                "project dependencies are not installed; skipped because pytest would fail during import collection",
+            )
+            coverage_result = _skipped_command(
+                "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
+                "project dependencies are not installed; skipped because coverage depends on pytest execution",
+            )
+        elif test_files:
             pytest_result = _optional_python_module(
                 sandbox,
                 "pytest",
@@ -1332,6 +1347,7 @@ def main():
                 ),
                 "dependency_install_default": "disabled",
                 "dependency_install_enable": "set APERIO_INSTALL_PROJECT_DEPS=1",
+                "dependency_required_tools": ["pip_audit", "pytest", "coverage"],
                 "pytest_coverage_limitation": (
                     "pytest and coverage use the discovered project test suite. If project "
                     "dependencies are not installed, import failures can make test and coverage "

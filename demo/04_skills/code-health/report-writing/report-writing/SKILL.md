@@ -27,9 +27,9 @@ triggers:
 3. 不要把“工具未运行、超时、被跳过”写成“无问题”；应写成“未覆盖”或“置信度降低”。
 4. 没有证据时不要声称具体 CVE、最新版本、漏洞可利用性、测试覆盖率或 docstring 覆盖率。
 5. 如果 `coverage_notes.mypy_mode=lightweight_ignore_missing_imports`，必须说明 mypy 忽略缺失第三方依赖导入，结论不等同完整 CI 类型检查。
-6. 如果 `setup.dependency_install.skipped=true`，必须说明项目依赖未安装，依赖审计和类型检查覆盖会受限。
-7. 如果 `tools.pip_audit.timed_out=true` 或 `exit_code=124`，必须说明依赖漏洞审计未完成，不能宣称依赖无漏洞。
-8. 如果 `tools.pytest.skipped=true` 或 `tools.coverage.skipped=true`，必须说明测试/覆盖率未覆盖；如果 pytest 因导入失败退出，不要把它写成业务测试失败。
+6. 如果 `setup.dependency_install.skipped=true`，必须说明项目依赖未安装，依赖审计、测试执行、覆盖率和类型检查覆盖会受限。
+7. 如果 `tools.pip_audit.skipped=true`，必须说明依赖漏洞审计按策略跳过，不能宣称依赖无漏洞；如果 `timed_out=true` 或 `exit_code=124`，说明依赖漏洞审计未完成。
+8. 如果 `tools.pytest.skipped=true` 或 `tools.coverage.skipped=true`，必须说明测试/覆盖率按策略未覆盖；如果 pytest 因导入失败退出，不要把它写成业务测试失败。
 9. 如果 `tools.deptry` 或 `tools.interrogate` 不可用，必须说明未覆盖未使用依赖/缺失依赖检查或 docstring 自动统计；如果项目依赖未安装，也要说明 deptry 传递依赖判断可能不完整。
 
 ## 报告结构

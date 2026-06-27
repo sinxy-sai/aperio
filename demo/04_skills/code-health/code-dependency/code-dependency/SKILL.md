@@ -16,7 +16,7 @@ triggers:
 ## 工作流程
 
 1. 先读取 `/outputs/code_health/raw/tool_results.json`，确认 `discovery.dependency_files`、`setup.dependency_install`、`tools.pip_audit` 和 `tools.deptry`。
-2. 如果 `tools.pip_audit.available=false` 或 `skipped=true`，只能报告“未执行漏洞数据库扫描”，不要编造 CVE 或最新版本。
+2. 如果 `tools.pip_audit.available=false` 或 `skipped=true`，只能报告“未执行漏洞数据库扫描”，不要编造 CVE 或最新版本；不要用联网搜索替代 pip-audit 的漏洞结论。
 3. 读取依赖清单文件，识别直接依赖、版本约束和锁文件是否存在。
 4. 检查许可证兼容性时必须说明依据；没有元数据时只提出“需确认”。
 5. 识别未声明的传递依赖和未使用依赖时优先引用 `tools.deptry`。deptry 当前按项目根目录 `.` 分析依赖清单，结论比只扫子目录更适合判断 unused dependency；仍需结合 import 或配置证据复核。
