@@ -82,11 +82,14 @@ from deepagents.middleware.skills import _list_skills_with_errors
 WORKSPACE_ROOT = (_PROJECT_ROOT / "demo/workspace_integrated").resolve()
 SKILLS_DIR = _DEMO_DIR / "04_skills"
 LOCAL_RESOURCES_DIR = _DEMO_DIR / "local_resources"
-TARGET_CODE = "full-stack-fastapi-template-master/backend/app/core"
-SANDBOX_TARGET_CODE = "/workspace/code"
+TARGET_PROJECT = "full-stack-fastapi-template-master/backend"
+TARGET_CODE = f"{TARGET_PROJECT}/app/core"
+SANDBOX_PROJECT_ROOT = "/workspace/project"
+SANDBOX_TARGET_CODE = f"{SANDBOX_PROJECT_ROOT}/app/core"
 DEFAULT_SANDBOX_IMAGE = "aperio-sandbox:py311-tools"
 SANDBOX_IMAGE = os.environ.get("APERIO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
 SANDBOX_DOCKERFILE = (_DEMO_DIR / "sandbox" / "Dockerfile").resolve()
+INSTALL_PROJECT_DEPS = os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0") == "1"
 
 
 def _skill_dir(name: str) -> str:
@@ -118,7 +121,8 @@ output_contract:
     - /outputs/prd_review/prd_v2_final.md
     - /outputs/prd_review/review_matrix.md
 code_health:
-  source_path: /workspace/code
+  project_root: /workspace/project
+  source_path: /workspace/project/app/core
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:
@@ -128,6 +132,8 @@ code_health:
       - mypy
       - bandit
       - pip-audit
+    schema: code-health-tools-v2
+    install_project_deps_default: false
     raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts
@@ -164,6 +170,7 @@ def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDo
 
 def print_sandbox_tool_debug(sandbox: "AgentDockerSandbox") -> None:
     print("\n[debug] Sandbox toolchain")
+    print(f"  project dependency install: {'enabled' if INSTALL_PROJECT_DEPS else 'disabled'}")
     commands = {
         "python": "python --version",
         "ruff": "ruff --version",
@@ -359,11 +366,14 @@ class DockerSandbox:
         if not ok:
             raise RuntimeError(f"failed to seed sandbox directory: {destination}")
 
-    def execute(self, command: str) -> tuple[str, int]:
+    def execute(self, command: str, timeout: int | None = None) -> tuple[str, int]:
         if not self.container:
             raise RuntimeError("sandbox container is not running")
+        exec_command = command
+        if timeout is not None:
+            exec_command = f"timeout {int(timeout)}s sh -c {shlex.quote(command)}"
         exit_code, output = self.container.exec_run(
-            ["sh", "-c", command],
+            ["sh", "-c", exec_command],
             workdir=self.working_dir,
             demux=False,
         )
@@ -490,9 +500,9 @@ class DockerSandbox:
 class AgentDockerSandbox(SandboxBackendProtocol):
     """Adapter that exposes DockerSandbox through SandboxBackendProtocol."""
 
-    def __init__(self, target_code: Path) -> None:
+    def __init__(self, target_project: Path) -> None:
         self._sandbox = DockerSandbox()
-        self._sandbox.seed_directory(target_code, SANDBOX_TARGET_CODE)
+        self._sandbox.seed_directory(target_project, SANDBOX_PROJECT_ROOT)
 
     @property
     def id(self) -> str:
@@ -503,7 +513,7 @@ class AgentDockerSandbox(SandboxBackendProtocol):
         return self._sandbox.image
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        output, exit_code = self._sandbox.execute(command)
+        output, exit_code = self._sandbox.execute(command, timeout=timeout)
         return ExecuteResponse(output=output, exit_code=exit_code)
 
     def ls(self, path: str = ".") -> LsResult:
@@ -534,9 +544,9 @@ class AgentDockerSandbox(SandboxBackendProtocol):
         self._sandbox.close()
 
 
-def _run_sandbox_json(sandbox: AgentDockerSandbox, code: str) -> dict:
+def _run_sandbox_json(sandbox: AgentDockerSandbox, code: str, cwd: str = SANDBOX_PROJECT_ROOT) -> dict:
     command = "python -c " + shlex.quote(code)
-    output, exit_code = sandbox._sandbox.execute(command)
+    output, exit_code = sandbox._sandbox.execute(f"cd {shlex.quote(cwd)} && {command}")
     if exit_code != 0:
         return {"ok": False, "exit_code": exit_code, "error": output.strip()}
     try:
@@ -545,17 +555,105 @@ def _run_sandbox_json(sandbox: AgentDockerSandbox, code: str) -> dict:
         return {"ok": False, "exit_code": exit_code, "error": output.strip()}
 
 
-def _optional_command(sandbox: AgentDockerSandbox, command: str, timeout_hint: str = "") -> dict:
-    check_cmd = "command -v " + shlex.quote(command.split()[0]) + " >/dev/null 2>&1"
+def _relative_sandbox_path(path: str, root: str = SANDBOX_PROJECT_ROOT) -> str:
+    normalized_path = path.rstrip("/")
+    normalized_root = root.rstrip("/")
+    if normalized_path == normalized_root:
+        return "."
+    if normalized_path.startswith(normalized_root + "/"):
+        return normalized_path[len(normalized_root) + 1:]
+    return normalized_path
+
+
+def _optional_command(
+    sandbox: AgentDockerSandbox,
+    command: str,
+    cwd: str = SANDBOX_PROJECT_ROOT,
+    timeout_hint: str = "",
+    max_output: int = 20000,
+    timeout_seconds: int | None = None,
+) -> dict:
+    executable = shlex.split(command)[0] if command.strip() else ""
+    check_cmd = "command -v " + shlex.quote(executable) + " >/dev/null 2>&1"
     _, found = sandbox._sandbox.execute(check_cmd)
     if found != 0:
-        return {"available": False, "reason": "command not installed"}
-    output, exit_code = sandbox._sandbox.execute(command)
-    return {
+        return {"available": False, "command": command, "cwd": cwd, "reason": "command not installed"}
+    output, exit_code = sandbox._sandbox.execute(
+        f"cd {shlex.quote(cwd)} && {command}",
+        timeout=timeout_seconds,
+    )
+    result = {
         "available": True,
+        "command": command,
+        "cwd": cwd,
         "exit_code": exit_code,
-        "output": output[:12000],
+        "output": output[:max_output],
+        "output_truncated": len(output) > max_output,
         "note": timeout_hint,
+    }
+    if timeout_seconds is not None:
+        result["timeout_seconds"] = timeout_seconds
+        if exit_code == 124:
+            result["timed_out"] = True
+    stripped = output.strip()
+    if stripped:
+        try:
+            result["json"] = json.loads(stripped)
+        except json.JSONDecodeError:
+            json_start = min(
+                [idx for idx in (stripped.find("{"), stripped.find("[")) if idx >= 0],
+                default=-1,
+            )
+            if json_start >= 0:
+                try:
+                    result["json"] = json.loads(stripped[json_start:])
+                except json.JSONDecodeError:
+                    pass
+    return result
+
+
+def _discover_project_files(sandbox: AgentDockerSandbox, target: str) -> dict:
+    code = r'''
+import json
+from pathlib import Path
+
+project_root = Path("PROJECT_ROOT_PLACEHOLDER")
+target = Path("TARGET_PLACEHOLDER")
+dependency_names = {
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile",
+    "Pipfile.lock",
+}
+result = {
+    "project_root": str(project_root),
+    "target": str(target),
+    "target_exists": target.exists(),
+    "python_files": [],
+    "dependency_files": [],
+}
+if target.exists():
+    result["python_files"] = [str(path) for path in sorted(target.rglob("*.py"))]
+if project_root.exists():
+    result["dependency_files"] = [
+        str(path)
+        for path in sorted(project_root.rglob("*"))
+        if path.is_file() and path.name in dependency_names
+    ]
+print(json.dumps(result, ensure_ascii=False))
+'''.replace("PROJECT_ROOT_PLACEHOLDER", SANDBOX_PROJECT_ROOT).replace("TARGET_PLACEHOLDER", target)
+    return _run_sandbox_json(sandbox, code)
+
+
+def _skipped_command(command: str, reason: str) -> dict:
+    return {
+        "available": False,
+        "command": command,
+        "skipped": True,
+        "reason": reason,
     }
 
 
@@ -692,7 +790,8 @@ def _code_health_subagents(ws: str, target: str) -> list:
             "name": "architect",
             "description": "Analyze code architecture: directory structure, module coupling, layering",
             "system_prompt": f"""你是代码架构师。分析 `{target}` 的架构：
-- 先读取 {ws}/raw/tool_results.json，优先引用其中的文件清单、imports、复杂度统计
+- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.python_files、tools.ruff、tools.mypy 的事实
+- 如果 coverage_notes.mypy_mode=lightweight_ignore_missing_imports，必须说明 mypy 是轻量模式，结论不能等同完整 CI 类型检查
 - 目录结构是否合理、模块粒度是否合适
 - 是否存在循环依赖、God Class
 - 分层是否清晰（API → 业务 → 数据）
@@ -703,7 +802,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
             "name": "security-analyst",
             "description": "Audit code for vulnerabilities: SQL injection, XSS, hardcoded secrets, OWASP Top-10",
             "system_prompt": f"""你是应用安全工程师。审计 `{target}` 的安全：
-- 先读取 {ws}/raw/tool_results.json，优先引用 security_grep、bandit、pip-audit 结果
+- 先读取 {ws}/raw/tool_results.json，优先引用 tools.bandit 和 tools.pip_audit 的事实
 - SQL 注入、XSS、硬编码密钥
 - 不安全反序列化、路径遍历
 - 敏感端点认证缺失
@@ -714,7 +813,8 @@ def _code_health_subagents(ws: str, target: str) -> list:
             "name": "dependency-checker",
             "description": "Check dependencies: outdated versions, CVEs, license compatibility",
             "system_prompt": f"""你是依赖管理专家。检查 `{target}` 的依赖：
-- 先读取 {ws}/raw/tool_results.json，优先引用 dependency_files 和 pip-audit 结果
+- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit 的事实
+- 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
@@ -724,7 +824,8 @@ def _code_health_subagents(ws: str, target: str) -> list:
             "name": "doc-reviewer",
             "description": "Review documentation: README, docstrings, API docs coverage",
             "system_prompt": f"""你是技术文档专家。评估 `{target}` 的文档：
-- 先读取 {ws}/raw/tool_results.json，优先引用 docstrings 和复杂度统计
+- 先读取 {ws}/raw/tool_results.json，使用 discovery.python_files 明确实际扫描范围
+- 文档/docstring 覆盖需要通过 read_file 阅读代码判断；不要声称已有自动 docstring 覆盖统计
 - README 完整性、公开 API docstring 覆盖率
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
@@ -738,7 +839,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 2. ls {ws}/drafts/ 发现所有分析报告
 3. read_file 逐个读取
 4. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
-5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况和置信度
+5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况、mypy 轻量模式限制和置信度
 6. 必须调用 write_file 工具，将最终报告以 Markdown 写入这个唯一最终路径：{ws}/code_health_report.md
 
 报告使用中文 Markdown，包含执行摘要和趋势对比（如有历史数据）。
@@ -847,9 +948,13 @@ def main():
     if not api_key:
         print("ERROR: DEEPSEEK_API_KEY not found")
         return
+    target_project_path = (_PROJECT_ROOT / TARGET_PROJECT).resolve()
     target_path = (_PROJECT_ROOT / TARGET_CODE).resolve()
+    if not target_project_path.exists():
+        print(f"ERROR: target project '{TARGET_PROJECT}' not found")
+        return
     if not target_path.exists():
-        print(f"ERROR: target '{TARGET_CODE}' not found")
+        print(f"ERROR: target code '{TARGET_CODE}' not found")
         return
 
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
@@ -864,7 +969,7 @@ def main():
     store = InMemoryStore()
     sandbox: AgentDockerSandbox | None = None
     try:
-        sandbox = AgentDockerSandbox(target_path)
+        sandbox = AgentDockerSandbox(target_project_path)
     except Exception as exc:
         print(f"ERROR: Docker sandbox unavailable: {exc}")
         print("Run Docker Desktop, then rerun this demo in the llm-dev environment.")
@@ -897,103 +1002,91 @@ def main():
 
     @tool
     def run_code_health_checks(target: str = SANDBOX_TARGET_CODE) -> str:
-        """Run deterministic code-health checks in the Docker sandbox and save JSON results."""
-        analysis_code = r'''
-import ast
-import compileall
-import json
-import os
-from pathlib import Path
+        """Run code-health tools in the Docker sandbox and save JSON results."""
+        target_rel = _relative_sandbox_path(target)
+        discovery = _discover_project_files(sandbox, target)
+        dependency_files = discovery.get("dependency_files", [])
 
-target = Path("TARGET_PLACEHOLDER")
-result = {
-    "target": str(target),
-    "exists": target.exists(),
-    "python_files": [],
-    "compile": {"ok": None},
-    "imports": {},
-    "docstrings": {"public_defs": 0, "missing": []},
-    "complexity": {"functions_over_50_lines": [], "files_over_500_lines": []},
-    "security_grep": [],
-    "dependency_files": [],
-}
-if not target.exists():
-    print(json.dumps(result, ensure_ascii=False))
-    raise SystemExit(0)
+        if INSTALL_PROJECT_DEPS:
+            dependency_install = _optional_command(
+                sandbox,
+                "python -m pip install --disable-pip-version-check -e .",
+                max_output=20000,
+                timeout_seconds=180,
+            )
+        else:
+            dependency_install = _skipped_command(
+                "python -m pip install --disable-pip-version-check -e .",
+                "disabled by default; set APERIO_INSTALL_PROJECT_DEPS=1 to install project dependencies inside the disposable container",
+            )
 
-py_files = sorted(target.rglob("*.py"))
-result["python_files"] = [str(p) for p in py_files]
-result["compile"]["ok"] = compileall.compile_dir(str(target), quiet=1)
+        if dependency_files:
+            pip_audit = _optional_command(
+                sandbox,
+                "pip-audit . --format json --progress-spinner off",
+                max_output=30000,
+                timeout_seconds=90,
+            )
+        else:
+            pip_audit = _skipped_command(
+                "pip-audit . --format json --progress-spinner off",
+                "no dependency manifest found under the sandbox project root",
+            )
 
-for name in ("pyproject.toml", "requirements.txt", "requirements-dev.txt", "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock"):
-    for p in target.rglob(name):
-        result["dependency_files"].append(str(p))
-
-secret_markers = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY", "API_KEY")
-for path in py_files:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        continue
-    lines = text.splitlines()
-    if len(lines) > 500:
-        result["complexity"]["files_over_500_lines"].append({"path": str(path), "lines": len(lines)})
-    for lineno, line in enumerate(lines, 1):
-        upper = line.upper()
-        if any(marker in upper for marker in secret_markers) and "=" in line and not line.strip().startswith("#"):
-            result["security_grep"].append({"path": str(path), "line": lineno, "text": line.strip()[:240]})
-    try:
-        tree = ast.parse(text)
-    except SyntaxError as exc:
-        result.setdefault("syntax_errors", []).append({"path": str(path), "line": exc.lineno, "message": exc.msg})
-        continue
-    imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.extend(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module.split(".")[0])
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if not node.name.startswith("_"):
-                result["docstrings"]["public_defs"] += 1
-                if ast.get_docstring(node) is None:
-                    result["docstrings"]["missing"].append({"path": str(path), "line": node.lineno, "name": node.name})
-            end = getattr(node, "end_lineno", node.lineno)
-            length = end - node.lineno + 1
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and length > 50:
-                result["complexity"]["functions_over_50_lines"].append({
-                    "path": str(path),
-                    "line": node.lineno,
-                    "name": node.name,
-                    "lines": length,
-                })
-    result["imports"][str(path)] = sorted(set(imports))
-
-print(json.dumps(result, ensure_ascii=False))
-'''.replace("TARGET_PLACEHOLDER", target)
-        stdlib_result = _run_sandbox_json(sandbox, analysis_code)
         tool_results = {
+            "schema_version": "code-health-tools-v2",
+            "project_root": SANDBOX_PROJECT_ROOT,
             "target": target,
-            "standard_library_analysis": stdlib_result,
-            "optional_tools": {
-                "ruff": _optional_command(sandbox, f"ruff check {shlex.quote(target)} --output-format json"),
-                "mypy": _optional_command(sandbox, f"mypy {shlex.quote(target)} --hide-error-context --no-error-summary"),
-                "bandit": _optional_command(sandbox, f"bandit -r {shlex.quote(target)} -f json"),
-                "pip_audit": _optional_command(sandbox, "pip-audit --format json"),
+            "target_rel": target_rel,
+            "coverage_notes": {
+                "mypy_mode": "lightweight_ignore_missing_imports",
+                "mypy_limitation": (
+                    "Project dependencies are not installed by default, so mypy runs with "
+                    "--ignore-missing-imports. Treat mypy findings as partial type-check "
+                    "coverage, not a full CI-equivalent type check."
+                ),
+                "dependency_install_default": "disabled",
+                "dependency_install_enable": "set APERIO_INSTALL_PROJECT_DEPS=1",
+            },
+            "discovery": discovery,
+            "setup": {
+                "dependency_install": dependency_install,
+            },
+            "tools": {
+                "ruff": _optional_command(
+                    sandbox,
+                    f"ruff check {shlex.quote(target_rel)} --output-format json --no-cache",
+                ),
+                "mypy": _optional_command(
+                    sandbox,
+                    f"mypy {shlex.quote(target_rel)} --hide-error-context --no-error-summary --no-incremental --ignore-missing-imports",
+                ),
+                "bandit": _optional_command(
+                    sandbox,
+                    f"bandit -r {shlex.quote(target_rel)} -f json -q",
+                    max_output=30000,
+                ),
+                "pip_audit": pip_audit,
             },
         }
         output_path = run_root / "code_health" / "raw" / "tool_results.json"
         _write_json(output_path, tool_results)
         summary = {
             "saved_to": "/outputs/code_health/raw/tool_results.json",
-            "analysis_ok": stdlib_result.get("ok", True),
-            "python_files": len(stdlib_result.get("python_files", [])),
-            "compile_ok": stdlib_result.get("compile", {}).get("ok"),
-            "missing_docstrings": len(stdlib_result.get("docstrings", {}).get("missing", [])),
-            "secret_like_lines": len(stdlib_result.get("security_grep", [])),
-            "optional_tools_available": {
+            "schema_version": tool_results["schema_version"],
+            "project_root": SANDBOX_PROJECT_ROOT,
+            "target": target,
+            "mypy_mode": tool_results["coverage_notes"]["mypy_mode"],
+            "python_files": len(discovery.get("python_files", [])),
+            "dependency_files": dependency_files,
+            "dependency_install_exit_code": dependency_install.get("exit_code"),
+            "tools_available": {
                 name: data.get("available", False)
-                for name, data in tool_results["optional_tools"].items()
+                for name, data in tool_results["tools"].items()
+            },
+            "tool_exit_codes": {
+                name: data.get("exit_code")
+                for name, data in tool_results["tools"].items()
             },
         }
         return json.dumps(summary, ensure_ascii=False)
@@ -1065,7 +1158,13 @@ print(json.dumps(result, ensure_ascii=False))
 5. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
 6. summarizer 的唯一最终产物必须是 Markdown 文件 {code_ws}/code_health_report.md；不要接受 HTML、JSON、/outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
 7. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
-8. 如有 /memories/history/ 中的历史数据，进行趋势对比""",
+8. 如有 /memories/history/ 中的历史数据，进行趋势对比
+
+硬性约束：
+- 必须先得到这 4 个草稿文件：{code_ws}/drafts/architect.md、{code_ws}/drafts/security.md、{code_ws}/drafts/dependencies.md、{code_ws}/drafts/documentation.md
+- 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
+- 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
+- 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",
         "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
     }
     prd_review_orchestrator = {

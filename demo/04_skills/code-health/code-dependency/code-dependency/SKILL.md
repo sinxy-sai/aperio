@@ -15,8 +15,8 @@ triggers:
 
 ## 工作流程
 
-1. 先读取 `/outputs/code_health/raw/tool_results.json`，确认 `dependency_files` 和 `optional_tools.pip_audit`。
-2. 如果 `pip_audit.available=false`，只能报告“未执行漏洞数据库扫描”，不要编造 CVE 或最新版本。
+1. 先读取 `/outputs/code_health/raw/tool_results.json`，确认 `discovery.dependency_files`、`setup.dependency_install` 和 `tools.pip_audit`。
+2. 如果 `tools.pip_audit.available=false` 或 `skipped=true`，只能报告“未执行漏洞数据库扫描”，不要编造 CVE 或最新版本。
 3. 读取依赖清单文件，识别直接依赖、版本约束和锁文件是否存在。
 4. 检查许可证兼容性时必须说明依据；没有元数据时只提出“需确认”。
 5. 识别未声明的传递依赖和未使用依赖时必须给出 import 或配置证据。
@@ -25,6 +25,7 @@ triggers:
 ## 证据规则
 
 - 必须区分“工具事实”“人工推断”“待验证项”。
+- 如果 `setup.dependency_install.skipped=true`，必须说明项目依赖未安装，mypy 类型检查和 pip-audit 依赖解析可能不是完整项目环境。
 - 不联网查询时，不要声称某包的最新版本。
 - 没有漏洞扫描结果时，不要写具体 CVE 编号。
 

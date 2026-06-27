@@ -16,7 +16,8 @@ output_contract:
     - /outputs/prd_review/prd_v2_final.md
     - /outputs/prd_review/review_matrix.md
 code_health:
-  source_path: /workspace/code
+  project_root: /workspace/project
+  source_path: /workspace/project/app/core
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:
@@ -26,6 +27,10 @@ code_health:
       - mypy
       - bandit
       - pip-audit
+    schema: code-health-tools-v2
+    install_project_deps_default: false
+    mypy_default_mode: lightweight_ignore_missing_imports
+    mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
     raw_results: /outputs/code_health/raw/tool_results.json
 prd_review:
   draft_dir: /outputs/prd_review/drafts

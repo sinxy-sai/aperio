@@ -19,6 +19,8 @@ triggers:
 2. 将结论分成三类：**工具事实**、**人工推断**、**建议**。
 3. 不要把“工具不可用”写成“无问题”；应写成“未覆盖/置信度降低”。
 4. 没有证据时不要声称具体 CVE、最新版本、漏洞可利用性或测试覆盖率。
+5. 如果 `coverage_notes.mypy_mode=lightweight_ignore_missing_imports`，最终报告必须在工具覆盖或置信度部分说明：mypy 忽略缺失第三方依赖导入，类型检查不是完整 CI 等价结果。
+6. 如果 `setup.dependency_install.skipped=true`，最终报告必须说明项目依赖未安装，依赖解析和类型检查覆盖受限。
 
 ## 健康报告格式
 
@@ -52,6 +54,7 @@ triggers:
 - 基础分 100。
 - Critical 每项 -20，High 每项 -10，Medium 每项 -4，Low 每项 -1。
 - 如果关键工具未运行（ruff/mypy/bandit/pip-audit 均不可用），最多给 85 分，并在置信度中说明。
+- 如果 mypy 使用轻量模式（`--ignore-missing-imports`），不要按“mypy 完整通过”加分；应说明类型检查覆盖受限。
 - 如果扫描范围只是子目录，必须说明评分只代表该范围。
 
 ## PRD 格式
