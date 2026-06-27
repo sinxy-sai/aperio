@@ -207,7 +207,7 @@ def print_sandbox_tool_debug(sandbox: "AgentDockerSandbox") -> None:
 
 def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> None:
     print("\n[debug] Subagents and skills")
-    print("  note: custom PerfMiddleware is attached to the main agent only; declared subagents build their own middleware stack.")
+    print("  note: declared subagents build their own middleware stack; this demo injects PerfMiddleware into each declared agent.")
     for name, spec in _collect_subagents(subagents):
         skill_sources = spec.get("skills", [])
         print(f"  - {name}: skills={skill_sources or '[]'}")
@@ -235,6 +235,14 @@ def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
             print(f"  - {name}: tools={tool_names} [override]")
         else:
             print(f"  - {name}: tools=inherited + custom={custom_tool_names or '[]'}")
+
+
+def print_subagent_middleware_debug(subagents: list[dict]) -> None:
+    print("\n[debug] Subagent middleware")
+    for name, spec in _collect_subagents(subagents):
+        middleware = spec.get("middleware", [])
+        middleware_names = [getattr(item, "name", type(item).__name__) for item in middleware]
+        print(f"  - {name}: middleware={middleware_names or '[]'}")
 
 
 def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
@@ -799,11 +807,16 @@ class PerfMiddleware(AgentMiddleware):
             raise
 
 
+def _perf_middleware(metrics: Metrics) -> list[AgentMiddleware]:
+    """Create a fresh performance middleware list sharing one metrics sink."""
+    return [PerfMiddleware(metrics)]
+
+
 # ---------------------------------------------------------------------------
 # Sub-agent definitions
 # ---------------------------------------------------------------------------
 
-def _code_health_subagents(ws: str, target: str) -> list:
+def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
     """Return the 5 sub-agents for code health orchestration."""
     language_rule = "输出语言硬性要求：全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文。"
     return [
@@ -820,6 +833,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "security-analyst",
@@ -833,6 +847,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 敏感端点认证缺失
 将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-security")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "dependency-checker",
@@ -847,6 +862,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "doc-reviewer",
@@ -860,6 +876,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "summarizer",
@@ -884,11 +901,12 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("code-health/report-writing")),
+            "middleware": _perf_middleware(metrics),
         },
     ]
 
 
-def _prd_review_subagents(ws: str) -> list:
+def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
     """Return the 5 sub-agents for PRD review orchestration (writer is the orchestrator itself)."""
     return [
         {
@@ -901,6 +919,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "technical-feasibility",
@@ -911,6 +930,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 是否有安全隐患
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "ux-researcher",
@@ -920,6 +940,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 交互一致性、无障碍、信息架构
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "risk-analyst",
@@ -929,6 +950,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 数据隐私合规、用户采纳障碍
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-test")),
+            "middleware": _perf_middleware(metrics),
         },
         {
             "name": "editor",
@@ -951,6 +973,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
+            "middleware": _perf_middleware(metrics),
         },
     ]
 
@@ -1274,6 +1297,7 @@ def main():
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
         "skills": _agent_skills(),
+        "middleware": _perf_middleware(metrics),
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
@@ -1298,12 +1322,13 @@ def main():
 - 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
 - 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
 - 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",
-        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE),
+        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE, metrics),
     }
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
         "skills": _agent_skills(),
+        "middleware": _perf_middleware(metrics),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
@@ -1321,7 +1346,7 @@ def main():
 7. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
 
 PRD 使用中文撰写。""",
-        "subagents": _prd_review_subagents(prd_ws),
+        "subagents": _prd_review_subagents(prd_ws, metrics),
     }
     subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
     custom_tools = [run_code_health_checks, internet_search]
@@ -1330,6 +1355,7 @@ PRD 使用中文撰写。""",
     print_sandbox_tool_debug(sandbox)
     print_subagent_debug(subagent_specs, backend)
     print_tool_debug(subagent_specs, custom_tools)
+    print_subagent_middleware_debug(subagent_specs)
     print_middleware_debug(user_middleware)
 
     # ---- Main Router Agent ----
