@@ -151,7 +151,9 @@ code_health:
       - coverage
       - deptry
       - interrogate
-    schema: code-health-tools-v3
+      - radon
+      - detect-secrets
+    schema: code-health-tools-v4
     install_project_deps_default: false
     mypy_default_mode: lightweight_ignore_missing_imports
     mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
@@ -209,6 +211,8 @@ def print_sandbox_tool_debug(sandbox: "AgentDockerSandbox") -> None:
         "coverage": "python -m coverage --version",
         "deptry": "deptry --version",
         "interrogate": "interrogate --version",
+        "radon": "radon --version",
+        "detect-secrets": "detect-secrets --version",
     }
     for name, command in commands.items():
         output, exit_code = sandbox._sandbox.execute(command)
@@ -1215,8 +1219,8 @@ def main():
         """Host-side wrapper that runs code-health commands inside Docker and saves JSON results.
 
         This tool function itself executes in the local Python process. Only the
-        ruff/mypy/bandit/pip-audit/pytest/coverage/deptry/interrogate commands
-        it launches run inside the Docker sandbox.
+        ruff/mypy/bandit/pip-audit/pytest/coverage/deptry/interrogate/radon/
+        detect-secrets commands it launches run inside the Docker sandbox.
         """
         target_rel = _relative_sandbox_path(target)
         if target_rel in code_health_check_cache:
@@ -1333,8 +1337,48 @@ def main():
             timeout_seconds=60,
         )
 
+        radon_cc = _optional_command(
+            sandbox,
+            f"radon cc {shlex.quote(target_rel)} --json --show-complexity",
+            max_output=30000,
+            timeout_seconds=60,
+        )
+        if radon_cc.get("available"):
+            radon_result = {
+                "available": True,
+                "cwd": SANDBOX_PROJECT_ROOT,
+                "cc": radon_cc,
+                "mi": _optional_command(
+                    sandbox,
+                    f"radon mi {shlex.quote(target_rel)} --json --show",
+                    max_output=30000,
+                    timeout_seconds=60,
+                ),
+                "raw": _optional_command(
+                    sandbox,
+                    f"radon raw {shlex.quote(target_rel)} --json --summary",
+                    max_output=30000,
+                    timeout_seconds=60,
+                ),
+                "note": "radon is dependency-free AST/static metric analysis for complexity and maintainability.",
+            }
+        else:
+            radon_result = radon_cc
+
+        detect_secrets_result = _optional_command(
+            sandbox,
+            (
+                "detect-secrets scan --all-files "
+                "--exclude-files "
+                + shlex.quote(r"(^|/)(\.mypy_cache|\.pytest_cache|\.ruff_cache|__pycache__)/|(^|/)(\.coverage\.json|\.deptry\.json|\.secrets\.baseline)$")
+                + " ."
+            ),
+            max_output=50000,
+            timeout_seconds=60,
+        )
+
         tool_results = {
-            "schema_version": "code-health-tools-v3",
+            "schema_version": "code-health-tools-v4",
             "project_root": SANDBOX_PROJECT_ROOT,
             "target": target,
             "target_rel": target_rel,
@@ -1382,6 +1426,8 @@ def main():
                 "coverage": coverage_result,
                 "deptry": deptry_result,
                 "interrogate": interrogate_result,
+                "radon": radon_result,
+                "detect_secrets": detect_secrets_result,
             },
         }
         output_path = run_root / "code_health" / "raw" / "tool_results.json"

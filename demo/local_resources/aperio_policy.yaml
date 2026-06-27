@@ -35,7 +35,9 @@ code_health:
       - coverage
       - deptry
       - interrogate
-    schema: code-health-tools-v3
+      - radon
+      - detect-secrets
+    schema: code-health-tools-v4
     install_project_deps_default: false
     mypy_default_mode: lightweight_ignore_missing_imports
     mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"

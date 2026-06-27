@@ -1,6 +1,6 @@
 ---
 name: report-writing
-description: Use when merging code-health drafts into the final Aperio code health report, especially when the report must combine ruff, mypy, bandit, pip-audit, pytest, coverage, deptry, interrogate, and human review evidence into a Chinese Markdown artifact.
+description: Use when merging code-health drafts into the final Aperio code health report, especially when the report must combine ruff, mypy, bandit, pip-audit, pytest, coverage, deptry, interrogate, radon, detect-secrets, and human review evidence into a Chinese Markdown artifact.
 triggers:
   - 代码健康报告
   - 健康度评分
@@ -31,6 +31,7 @@ triggers:
 7. 如果 `tools.pip_audit.skipped=true`，必须说明依赖漏洞审计按策略跳过，不能宣称依赖无漏洞；如果 `timed_out=true` 或 `exit_code=124`，说明依赖漏洞审计未完成。
 8. 如果 `tools.pytest.skipped=true` 或 `tools.coverage.skipped=true`，必须说明测试/覆盖率按策略未覆盖；如果 pytest 因导入失败退出，不要把它写成业务测试失败。
 9. 如果 `tools.deptry` 或 `tools.interrogate` 不可用，必须说明未覆盖未使用依赖/缺失依赖检查或 docstring 自动统计；如果项目依赖未安装，也要说明 deptry 传递依赖判断可能不完整。
+10. 如果 `tools.radon` 可用，必须在架构/可维护性部分引用圈复杂度和 Maintainability Index；如果 `tools.detect_secrets` 可用，必须在安全部分报告疑似密钥数量和复核结论。
 
 ## 报告结构
 

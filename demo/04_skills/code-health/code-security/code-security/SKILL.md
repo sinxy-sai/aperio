@@ -16,7 +16,7 @@ triggers:
 ## 工作流程
 
 1. 先读取 `/outputs/code_health/raw/tool_results.json`。如果不存在，说明缺少工具事实，只能做人工审查并降低置信度。
-2. 使用其中的 `tools.bandit` 和 `tools.pip_audit` 作为事实来源。
+2. 使用其中的 `tools.bandit`、`tools.detect_secrets` 和 `tools.pip_audit` 作为事实来源。
 3. 如果某个工具标记为 `available=false`，必须明确写“未运行/不可用”，不要编造扫描结果。
 4. 人工审查扫描结果，结合代码上下文判断是否为真实漏洞。
 5. 去除误报后按严重度分级（Critical > High > Medium > Low）。
@@ -26,6 +26,7 @@ triggers:
 
 - 必须区分“工具事实”“人工推断”“建议”。
 - 没有工具结果或代码证据时，不要声称存在 CVE 或真实漏洞。
+- `detect-secrets` 的发现是“疑似密钥”，必须结合文件路径和上下文判断误报；不要直接写成已泄露密钥。
 - 每个 High 以上问题必须包含文件:行号、影响、攻击/滥用场景、修复方案。
 
 ## 检查清单

@@ -13,6 +13,8 @@ RUN python -m pip install --upgrade pip setuptools wheel \
         "pytest>=8.0,<9.0" \
         "coverage>=7.4,<8.0" \
         "deptry>=0.16,<1.0" \
-        "interrogate>=1.7,<2.0"
+        "interrogate>=1.7,<2.0" \
+        "radon>=6.0,<7.0" \
+        "detect-secrets>=1.5,<2.0"
 
 WORKDIR /workspace
