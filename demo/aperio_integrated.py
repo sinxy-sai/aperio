@@ -277,8 +277,10 @@ def _is_approval_choice(choice: str) -> bool:
 def handle_human_approval(agent, response, config: dict, label: str):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
-        decisions = []
+        resume_map = {}
+        single_resume_payload = None
         for interrupt in response.interrupts:
+            decisions = []
             for action in interrupt.value.get("action_requests", []):
                 print(f"\n  ⏸️  HITL: Agent 请求执行 [{action['name']}]")
                 if action['name'] == 'execute':
@@ -305,7 +307,11 @@ def handle_human_approval(agent, response, config: dict, label: str):
                     "type": "approve" if approved else "reject",
                     "updated_args": action["args"] if approved else None,
                 })
-        response = agent.invoke(Command(resume={"decisions": decisions}), config=config, version="v2")
+            payload = {"decisions": decisions}
+            single_resume_payload = payload
+            resume_map[interrupt.id] = payload
+        resume_payload = single_resume_payload if len(response.interrupts) == 1 else resume_map
+        response = agent.invoke(Command(resume=resume_payload), config=config, version="v2")
         print(f"[debug] {label} resumed_response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     return response
 
@@ -1391,7 +1397,7 @@ PRD 使用中文撰写。""",
         middleware=code_health_orchestrator["middleware"],
         permissions=permissions,
         skills=code_health_orchestrator["skills"],
-        interrupt_on=None,
+        interrupt_on=root_interrupt_on,
         system_prompt=code_health_orchestrator["system_prompt"],
         subagents=code_health_orchestrator["subagents"],
         name=code_health_orchestrator["name"],
@@ -1404,7 +1410,7 @@ PRD 使用中文撰写。""",
         middleware=prd_review_orchestrator["middleware"],
         permissions=permissions,
         skills=prd_review_orchestrator["skills"],
-        interrupt_on=None,
+        interrupt_on=root_interrupt_on,
         system_prompt=prd_review_orchestrator["system_prompt"],
         subagents=prd_review_orchestrator["subagents"],
         name=prd_review_orchestrator["name"],
