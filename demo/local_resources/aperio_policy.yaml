@@ -41,4 +41,9 @@ prd_review:
   prd_v1: /outputs/prd_review/prd_v1.md
   final_prd: /outputs/prd_review/prd_v2_final.md
   review_matrix: /outputs/prd_review/review_matrix.md
+web_search:
+  raw_evidence_dir:
+    code_health: /outputs/code_health/raw/web_search
+    prd_review: /outputs/prd_review/raw/web_search
+  memory_policy: "do not store raw search results in /memories/; only curated reusable conclusions belong there"
 team: aperio-demo

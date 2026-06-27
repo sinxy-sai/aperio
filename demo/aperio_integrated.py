@@ -97,6 +97,11 @@ def _skill_dir(name: str) -> str:
     return "/skills/" + name.replace("\\", "/").strip("/")
 
 
+def _shared_skill_dir() -> str:
+    """Return the root shared-skill source under /skills/."""
+    return _skill_dir("")
+
+
 def setup_local_resources() -> Path:
     """Create read-only local resources exposed through CompositeBackend."""
     LOCAL_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
@@ -144,6 +149,11 @@ prd_review:
   prd_v1: /outputs/prd_review/prd_v1.md
   final_prd: /outputs/prd_review/prd_v2_final.md
   review_matrix: /outputs/prd_review/review_matrix.md
+web_search:
+  raw_evidence_dir:
+    code_health: /outputs/code_health/raw/web_search
+    prd_review: /outputs/prd_review/raw/web_search
+  memory_policy: "do not store raw search results in /memories/; only curated reusable conclusions belong there"
 team: aperio-demo
 """,
             encoding="utf-8",
@@ -826,11 +836,11 @@ def _code_health_subagents(ws: str, target: str) -> list:
 你是依赖管理专家。检查 `{target}` 的依赖：
 - 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit 的事实
 - 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
-- 可以用 internet_search 查询公开依赖生态信息，但不能把搜索摘要当作已验证 CVE；具体漏洞仍以 pip-audit 或明确官方公告为准
+- 可以按 web-search skill 使用 internet_search 查询公开依赖生态信息，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；不能把搜索摘要当作已验证 CVE，具体漏洞仍以 pip-audit 或明确官方公告为准
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
-            "skills": [_skill_dir("code-health/code-dependency")],
+            "skills": [_shared_skill_dir(), _skill_dir("code-health/code-dependency")],
         },
         {
             "name": "doc-reviewer",
@@ -882,9 +892,9 @@ def _prd_review_subagents(ws: str) -> list:
 - 市场定位是否清晰、是否有明确竞品
 - 商业价值和差异化在哪里
 - MVP 功能优先级是否合理
-- 可以用 internet_search 检索公开竞品、市场和行业实践；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
+- 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
-            "skills": [_skill_dir("prd-review/review-ops")],
+            "skills": [_shared_skill_dir(), _skill_dir("prd-review/review-ops")],
         },
         {
             "name": "technical-feasibility",
@@ -1109,12 +1119,28 @@ def main():
         return json.dumps(summary, ensure_ascii=False)
 
     @tool
-    def internet_search(query: str, max_results: int = 3) -> str:
-        """Search the public web with DuckDuckGo and return structured evidence snippets."""
+    def internet_search(query: str, max_results: int = 3, save_path: str = "") -> str:
+        """Search the public web with DuckDuckGo, optionally saving JSON evidence under /outputs/."""
         query = (query or "").strip()
+        save_path = (save_path or "").strip().replace("\\", "/")
         if not query:
             return json.dumps(
                 {"ok": False, "error": "query is empty", "results": []},
+                ensure_ascii=False,
+            )
+        if save_path and (
+            not save_path.startswith("/outputs/")
+            or not save_path.endswith(".json")
+            or "/../" in save_path
+            or save_path.startswith("/outputs/../")
+        ):
+            return json.dumps(
+                {
+                    "ok": False,
+                    "query": query,
+                    "error": "save_path must be a JSON file under /outputs/",
+                    "results": [],
+                },
                 ensure_ascii=False,
             )
 
@@ -1171,19 +1197,22 @@ def main():
                 }
             )
 
-        return json.dumps(
-            {
-                "ok": True,
-                "query": query,
-                "max_results": limit,
-                "results": results,
-                "evidence_policy": (
-                    "Use these as public web evidence only. Do not replace local "
-                    "repository facts, tool results, or project files with web snippets."
-                ),
-            },
-            ensure_ascii=False,
-        )
+        payload = {
+            "ok": True,
+            "query": query,
+            "max_results": limit,
+            "results": results,
+            "evidence_policy": (
+                "Use these as public web evidence only. Do not replace local "
+                "repository facts, tool results, or project files with web snippets."
+            ),
+        }
+        if save_path:
+            local_path = run_root / save_path.removeprefix("/outputs/")
+            _write_json(local_path, payload)
+            payload["saved_to"] = save_path
+
+        return json.dumps(payload, ensure_ascii=False)
 
     # ---- Model ----
     primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
