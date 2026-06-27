@@ -45,7 +45,7 @@ _PROJECT_ROOT = _DEMO_DIR.parent
 from dotenv import load_dotenv
 load_dotenv(_DEMO_DIR / ".env")
 
-from deepagents import FilesystemPermission, create_deep_agent
+from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
 from deepagents.backends import FilesystemBackend, CompositeBackend, StateBackend
 from deepagents.backends.protocol import (
     EditResult,
@@ -75,6 +75,7 @@ from langchain.agents.middleware import (
 from langgraph.config import get_config
 from langgraph.types import Command
 from deepagents.middleware.skills import _list_skills_with_errors
+from deepagents.middleware.summarization import SummarizationMiddleware, compute_summarization_defaults
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -265,7 +266,8 @@ def print_subagent_middleware_debug(subagents: list[dict]) -> None:
 
 def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
     print("\n[debug] User-configured middleware")
-    print("  note: DeepAgents also installs TodoList, Filesystem, SubAgent, Summarization, and HITL middleware internally.")
+    print("  note: DeepAgents still installs TodoList, Filesystem, SubAgent, and HITL internally.")
+    print("  note: default SummarizationMiddleware is excluded by HarnessProfile; ObservableSummarizationMiddleware is injected explicitly.")
     print("  model rate limit: 20 requests/minute shared by primary and fallback models")
     for item in middleware:
         print(f"  - {item.name}")
@@ -830,6 +832,7 @@ class Metrics:
     model_time_ms: float = 0.0
     tool_calls: int = 0
     tool_time_ms: float = 0.0
+    summarization_events: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     events: list = field(default_factory=list)
@@ -854,6 +857,7 @@ class Metrics:
             "model_avg_ms": round(self.model_time_ms / max(1, self.model_calls), 1),
             "tool_calls": self.tool_calls,
             "tool_avg_ms": round(self.tool_time_ms / max(1, self.tool_calls), 1),
+            "summarization_events": self.summarization_events,
             "total_tokens": self.tokens_in + self.tokens_out,
             "by_thread": self.by_thread,
             "by_agent": self.by_agent,
@@ -963,16 +967,93 @@ class PerfMiddleware(AgentMiddleware):
             raise
 
 
-def _perf_middleware(metrics: Metrics, agent_name: str) -> list[AgentMiddleware]:
-    """Create a fresh performance middleware list sharing one metrics sink."""
-    return [PerfMiddleware(metrics, agent_name=agent_name)]
+class ObservableSummarizationMiddleware(SummarizationMiddleware):
+    """DeepAgents summarization with explicit debug and metrics events."""
+
+    def __init__(self, *args, metrics: Metrics, agent_name: str, verbose: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.m = metrics
+        self.agent_name = agent_name
+        self.verbose = verbose
+
+    def _record_if_summarized(self, request, response) -> None:
+        command = getattr(response, "command", None)
+        update = getattr(command, "update", None)
+        if not isinstance(update, dict):
+            return
+
+        summarization_event = update.get("_summarization_event")
+        if not isinstance(summarization_event, dict):
+            return
+
+        thread_id = PerfMiddleware._thread_id(request)
+        messages = getattr(request, "messages", []) or []
+        event = {
+            "type": "summarization",
+            "agent": self.agent_name,
+            "thread_id": thread_id,
+            "cutoff_index": summarization_event.get("cutoff_index"),
+            "file_path": summarization_event.get("file_path"),
+            "messages_before": len(messages),
+        }
+        self.m.summarization_events += 1
+        self.m.record_thread(thread_id, "summarization")
+        self.m.record_agent(self.agent_name, thread_id, "summarization")
+        self.m.events.append(event)
+        if self.verbose:
+            print(
+                "[debug] summarization "
+                f"agent={self.agent_name} thread={thread_id} "
+                f"cutoff={event['cutoff_index']} file={event['file_path']}"
+            )
+
+    def wrap_model_call(self, request, handler):
+        response = super().wrap_model_call(request, handler)
+        self._record_if_summarized(request, response)
+        return response
+
+    async def awrap_model_call(self, request, handler):
+        response = await super().awrap_model_call(request, handler)
+        self._record_if_summarized(request, response)
+        return response
+
+
+def _observable_summarization_middleware(metrics: Metrics, agent_name: str, model, backend) -> AgentMiddleware:
+    defaults = compute_summarization_defaults(model)
+    return ObservableSummarizationMiddleware(
+        model=model,
+        backend=backend,
+        trigger=defaults["trigger"],
+        keep=defaults["keep"],
+        trim_tokens_to_summarize=None,
+        truncate_args_settings=defaults["truncate_args_settings"],
+        metrics=metrics,
+        agent_name=agent_name,
+    )
+
+
+def _agent_middleware(metrics: Metrics, agent_name: str, model, backend) -> list[AgentMiddleware]:
+    """Create fresh observability middleware sharing one metrics sink."""
+    return [
+        _observable_summarization_middleware(metrics, agent_name, model, backend),
+        PerfMiddleware(metrics, agent_name=agent_name),
+    ]
+
+
+def _install_observable_summarization_profile(*model_specs: str) -> None:
+    """Disable DeepAgents' internal summarizer so this demo can observe it explicitly."""
+    for model_spec in dict.fromkeys(spec for spec in model_specs if spec):
+        register_harness_profile(
+            model_spec,
+            HarnessProfile(excluded_middleware=frozenset({"SummarizationMiddleware"})),
+        )
 
 
 # ---------------------------------------------------------------------------
 # Sub-agent definitions
 # ---------------------------------------------------------------------------
 
-def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
+def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backend) -> list:
     """Return the 5 sub-agents for code health orchestration."""
     language_rule = "输出语言硬性要求：全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文。"
     return [
@@ -989,7 +1070,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 分层是否清晰（API → 业务 → 数据）
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
-            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.architect"),
+            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.architect", model, backend),
         },
         {
             "name": "security-analyst",
@@ -1003,7 +1084,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 敏感端点认证缺失
 将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-security")),
-            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.security-analyst"),
+            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.security-analyst", model, backend),
         },
         {
             "name": "dependency-checker",
@@ -1019,7 +1100,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
-            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.dependency-checker"),
+            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.dependency-checker", model, backend),
         },
         {
             "name": "doc-reviewer",
@@ -1033,7 +1114,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 注释质量、配置说明
 将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
-            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.doc-reviewer"),
+            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.doc-reviewer", model, backend),
         },
         {
             "name": "summarizer",
@@ -1058,12 +1139,12 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("code-health/report-writing")),
-            "middleware": _perf_middleware(metrics, "root.code-health-orchestrator.summarizer"),
+            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
         },
     ]
 
 
-def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
+def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
     """Return the 5 sub-agents for PRD review orchestration (writer is the orchestrator itself)."""
     return [
         {
@@ -1076,7 +1157,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
-            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.product-strategist"),
+            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
         },
         {
             "name": "technical-feasibility",
@@ -1087,7 +1168,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 是否有安全隐患
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
-            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility"),
+            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
         },
         {
             "name": "ux-researcher",
@@ -1097,7 +1178,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 交互一致性、无障碍、信息架构
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
-            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.ux-researcher"),
+            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
         },
         {
             "name": "risk-analyst",
@@ -1107,7 +1188,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 数据隐私合规、用户采纳障碍
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-test")),
-            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.risk-analyst"),
+            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
         },
         {
             "name": "editor",
@@ -1130,7 +1211,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics) -> list:
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
             "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
-            "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator.editor"),
+            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
         },
     ]
 
@@ -1571,10 +1652,11 @@ def main():
         base_url="https://api.deepseek.com",
         rate_limiter=model_rate_limiter,
     )
+    _install_observable_summarization_profile(primary_model_name, fallback_model_name)
 
     # ---- Middleware ----
     metrics = Metrics()
-    perf = PerfMiddleware(metrics, agent_name="root")
+    root_observability = _agent_middleware(metrics, "root", model, backend)
     user_middleware: list[AgentMiddleware] = [
         ModelCallLimitMiddleware(
             run_limit=100,
@@ -1587,7 +1669,7 @@ def main():
             on_failure="error",
         ),
         ModelFallbackMiddleware(fallback_model),
-        perf,
+        *root_observability,
         ToolRetryMiddleware(
             tools=["ls", "glob", "grep", "read_file", "run_code_health_checks", "internet_search"],
             max_retries=2,
@@ -1610,7 +1692,7 @@ def main():
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
         "skills": _agent_skills(),
-        "middleware": _perf_middleware(metrics, "root.code-health-orchestrator"),
+        "middleware": _agent_middleware(metrics, "root.code-health-orchestrator", model, backend),
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
@@ -1637,13 +1719,13 @@ def main():
 - 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
 - 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
 - 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",
-        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE, metrics),
+        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE, metrics, model, backend),
     }
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
         "skills": _agent_skills(),
-        "middleware": _perf_middleware(metrics, "root.prd-review-orchestrator"),
+        "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
@@ -1663,7 +1745,7 @@ def main():
 9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
 
 PRD 使用中文撰写。""",
-        "subagents": _prd_review_subagents(prd_ws, metrics),
+        "subagents": _prd_review_subagents(prd_ws, metrics, model, backend),
     }
     code_health_orchestrator["runnable"] = create_deep_agent(
         model=model,
