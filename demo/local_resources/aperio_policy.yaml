@@ -3,6 +3,10 @@ security:
   require_human_approval:
     - execute
     - write_file
+  internet_search:
+    mode: read_only_public_web
+    approval_required: false
+    evidence_rule: "web snippets are supplemental; local files and tool results remain authoritative"
 storage:
   default: docker_sandbox
   outputs: filesystem

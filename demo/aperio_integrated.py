@@ -108,6 +108,10 @@ def setup_local_resources() -> Path:
   require_human_approval:
     - execute
     - write_file
+  internet_search:
+    mode: read_only_public_web
+    approval_required: false
+    evidence_rule: "web snippets are supplemental; local files and tool results remain authoritative"
 storage:
   default: docker_sandbox
   outputs: filesystem
@@ -785,11 +789,14 @@ class PerfMiddleware(AgentMiddleware):
 
 def _code_health_subagents(ws: str, target: str) -> list:
     """Return the 5 sub-agents for code health orchestration."""
+    language_rule = "输出语言硬性要求：全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文。"
     return [
         {
             "name": "architect",
             "description": "Analyze code architecture: directory structure, module coupling, layering",
-            "system_prompt": f"""你是代码架构师。分析 `{target}` 的架构：
+            "system_prompt": f"""{language_rule}
+
+你是代码架构师。分析 `{target}` 的架构：
 - 先读取 {ws}/raw/tool_results.json，优先引用 discovery.python_files、tools.ruff、tools.mypy 的事实
 - 如果 coverage_notes.mypy_mode=lightweight_ignore_missing_imports，必须说明 mypy 是轻量模式，结论不能等同完整 CI 类型检查
 - 目录结构是否合理、模块粒度是否合适
@@ -801,7 +808,9 @@ def _code_health_subagents(ws: str, target: str) -> list:
         {
             "name": "security-analyst",
             "description": "Audit code for vulnerabilities: SQL injection, XSS, hardcoded secrets, OWASP Top-10",
-            "system_prompt": f"""你是应用安全工程师。审计 `{target}` 的安全：
+            "system_prompt": f"""{language_rule}
+
+你是应用安全工程师。审计 `{target}` 的安全：
 - 先读取 {ws}/raw/tool_results.json，优先引用 tools.bandit 和 tools.pip_audit 的事实
 - SQL 注入、XSS、硬编码密钥
 - 不安全反序列化、路径遍历
@@ -812,9 +821,12 @@ def _code_health_subagents(ws: str, target: str) -> list:
         {
             "name": "dependency-checker",
             "description": "Check dependencies: outdated versions, CVEs, license compatibility",
-            "system_prompt": f"""你是依赖管理专家。检查 `{target}` 的依赖：
+            "system_prompt": f"""{language_rule}
+
+你是依赖管理专家。检查 `{target}` 的依赖：
 - 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit 的事实
 - 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
+- 可以用 internet_search 查询公开依赖生态信息，但不能把搜索摘要当作已验证 CVE；具体漏洞仍以 pip-audit 或明确官方公告为准
 - 主版本落后的包、已知 CVE
 - 许可证兼容性、未声明的传递依赖
 将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
@@ -823,7 +835,9 @@ def _code_health_subagents(ws: str, target: str) -> list:
         {
             "name": "doc-reviewer",
             "description": "Review documentation: README, docstrings, API docs coverage",
-            "system_prompt": f"""你是技术文档专家。评估 `{target}` 的文档：
+            "system_prompt": f"""{language_rule}
+
+你是技术文档专家。评估 `{target}` 的文档：
 - 先读取 {ws}/raw/tool_results.json，使用 discovery.python_files 明确实际扫描范围
 - 文档/docstring 覆盖需要通过 read_file 阅读代码判断；不要声称已有自动 docstring 覆盖统计
 - README 完整性、公开 API docstring 覆盖率
@@ -834,7 +848,9 @@ def _code_health_subagents(ws: str, target: str) -> list:
         {
             "name": "summarizer",
             "description": "Merge 4 analysis reports into a consolidated code health report",
-            "system_prompt": f"""你是报告汇总专家。任务：
+            "system_prompt": f"""{language_rule}
+
+你是报告汇总专家。任务：
 1. read_file 读取 {ws}/raw/tool_results.json
 2. ls {ws}/drafts/ 发现所有分析报告
 3. read_file 逐个读取
@@ -851,7 +867,7 @@ def _code_health_subagents(ws: str, target: str) -> list:
 - 调用 write_file 成功写入 {ws}/code_health_report.md 后立即结束任务
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
-            "skills": [_skill_dir("general/report-writing")],
+            "skills": [_skill_dir("code-health/report-writing")],
         },
     ]
 
@@ -866,6 +882,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 市场定位是否清晰、是否有明确竞品
 - 商业价值和差异化在哪里
 - MVP 功能优先级是否合理
+- 可以用 internet_search 检索公开竞品、市场和行业实践；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
 读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
             "skills": [_skill_dir("prd-review/review-ops")],
         },
@@ -917,7 +934,7 @@ def _prd_review_subagents(ws: str) -> list:
 - 调用 write_file 成功写入上述两个标准文件后立即结束任务
 - 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
 - /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
-            "skills": [_skill_dir("general/report-writing"), _skill_dir("general/review-matrix")],
+            "skills": [_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")],
         },
     ]
 
@@ -1091,6 +1108,83 @@ def main():
         }
         return json.dumps(summary, ensure_ascii=False)
 
+    @tool
+    def internet_search(query: str, max_results: int = 3) -> str:
+        """Search the public web with DuckDuckGo and return structured evidence snippets."""
+        query = (query or "").strip()
+        if not query:
+            return json.dumps(
+                {"ok": False, "error": "query is empty", "results": []},
+                ensure_ascii=False,
+            )
+
+        try:
+            limit = max(1, min(int(max_results), 5))
+        except (TypeError, ValueError):
+            limit = 3
+
+        try:
+            from ddgs import DDGS
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "query": query,
+                    "error": f"ddgs is not available: {type(exc).__name__}: {exc}",
+                    "results": [],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            with DDGS() as ddgs:
+                raw_results = list(
+                    ddgs.text(
+                        query,
+                        max_results=limit,
+                        safesearch="moderate",
+                    )
+                )
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "query": query,
+                    "error": f"search failed: {type(exc).__name__}: {exc}",
+                    "results": [],
+                },
+                ensure_ascii=False,
+            )
+
+        results = []
+        for item in raw_results[:limit]:
+            title = str(item.get("title") or "").strip()
+            snippet = str(item.get("body") or item.get("snippet") or "").strip()
+            url = str(item.get("href") or item.get("url") or "").strip()
+            if not title and not snippet and not url:
+                continue
+            results.append(
+                {
+                    "title": title,
+                    "snippet": snippet[:600],
+                    "url": url,
+                }
+            )
+
+        return json.dumps(
+            {
+                "ok": True,
+                "query": query,
+                "max_results": limit,
+                "results": results,
+                "evidence_policy": (
+                    "Use these as public web evidence only. Do not replace local "
+                    "repository facts, tool results, or project files with web snippets."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
     # ---- Model ----
     primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
     fallback_model_name = os.environ.get("APERIO_FALLBACK_MODEL", "openai:deepseek-v4-flash")
@@ -1129,7 +1223,7 @@ def main():
         ModelFallbackMiddleware(fallback_model),
         perf,
         ToolRetryMiddleware(
-            tools=["ls", "glob", "grep", "read_file", "run_code_health_checks"],
+            tools=["ls", "glob", "grep", "read_file", "run_code_health_checks", "internet_search"],
             max_retries=2,
             initial_delay=0.5,
             max_delay=2.0,
@@ -1161,6 +1255,9 @@ def main():
 8. 如有 /memories/history/ 中的历史数据，进行趋势对比
 
 硬性约束：
+- code-health 的 4 个草稿和最终报告必须全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文
+- internet_search 是只读联网工具，只能作为公开资料补充；代码事实、扫描结论和最终风险判定必须优先来自本地代码、{code_ws}/raw/tool_results.json 和草稿报告
+- 如果引用 internet_search 结果，必须明确标注其为公开网络证据，并保留链接；联网失败时不要编造公开资料
 - 必须先得到这 4 个草稿文件：{code_ws}/drafts/architect.md、{code_ws}/drafts/security.md、{code_ws}/drafts/dependencies.md、{code_ws}/drafts/documentation.md
 - 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
 - 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
@@ -1190,7 +1287,7 @@ PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws),
     }
     subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
-    custom_tools = [run_code_health_checks]
+    custom_tools = [run_code_health_checks, internet_search]
 
     print_backend_debug(run_root, local_resources, sandbox)
     print_sandbox_tool_debug(sandbox)
@@ -1214,6 +1311,7 @@ PRD 使用中文撰写。""",
 
 - 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
 - 如果用户要求**写 PRD、评审需求、产品需求文档**→ 委托给 prd-review-orchestrator
+- internet_search 是只读联网工具，可用于公开资料检索；不要用它替代本地文件、工具结果或用户输入事实
 
 CompositeBackend 分层存储策略：
 1. 默认路径 → DockerSandbox，所有未匹配路径和 execute 工具都在隔离容器中执行

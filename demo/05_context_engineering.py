@@ -87,7 +87,7 @@ async def main():
     # ISOLATE: each sub-agent loads ONLY its own skill
     architect_skill = _load_skill("code-health/code-architect")
     security_skill = _load_skill("code-health/code-security")
-    report_skill = _load_skill("general/report-writing")
+    report_skill = _load_skill("code-health/report-writing")
 
     # Main orchestrator has the report-writing skill + context engineering instructions
     orchestrator_prompt = f"""{report_skill}
