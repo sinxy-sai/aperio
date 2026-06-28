@@ -124,14 +124,33 @@ PROJECT_ROOT_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class ObservedTaskOutputs:
+    code_health: bool
+    prd_review: bool
+
+    @property
+    def any_observed(self) -> bool:
+        return self.code_health or self.prd_review
+
+    @property
+    def labels(self) -> set[str]:
+        labels: set[str] = set()
+        if self.code_health:
+            labels.add("code-health")
+        if self.prd_review:
+            labels.add("prd-review")
+        return labels
+
+
 def read_runtime_task() -> str:
     """Read the user task at runtime; empty input means the current workspace."""
-    print("\n请输入任务，例如：对 path/to/project/src 做完整的代码健康检查")
+    print("\n请输入任务，例如：对 path/to/project/src 做完整的代码健康检查，或为某个产品想法写 PRD 并评审")
     try:
         task = input("> ").strip()
     except EOFError:
         task = ""
-    return task or "请对当前工作区做完整的代码健康检查。"
+    return task
 
 
 def _clean_path_candidate(text: str) -> str:
@@ -204,6 +223,19 @@ def resolve_code_health_input(task_text: str) -> tuple[Path, str, Path]:
     project_root = _PROJECT_ROOT.resolve()
     return project_root, ".", project_root
 
+
+def resolve_optional_code_context(task_text: str) -> tuple[Path, str, Path, bool]:
+    """Resolve an optional code context without deciding whether code-health should run."""
+    for candidate in extract_path_candidates(task_text):
+        candidate_path = _resolve_host_path(candidate)
+        if not candidate_path.exists():
+            continue
+        project_root = infer_project_root(candidate_path)
+        return project_root, _relative_path(candidate_path, project_root), candidate_path, True
+
+    project_root = _PROJECT_ROOT.resolve()
+    return project_root, ".", project_root, False
+
 def _skill_dir(name: str) -> str:
     """Build a virtual skill source routed through CompositeBackend."""
     return "/skills/" + name.replace("\\", "/").strip("/")
@@ -220,7 +252,7 @@ def _agent_skills(*sources: str) -> list[str]:
     return list(dict.fromkeys(ordered))
 
 
-def setup_local_resources(code_target_rel: str) -> Path:
+def setup_local_resources(code_target_rel: str = ".") -> Path:
     """Create read-only local resources exposed through CompositeBackend."""
     LOCAL_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
     policy_file = LOCAL_RESOURCES_DIR / "aperio_policy.yaml"
@@ -246,9 +278,11 @@ storage:
 output_contract:
   root_markdown_aliases: denied
   final_outputs:
-    - /outputs/code_health/code_health_report.md
-    - /outputs/prd_review/prd_v2_final.md
-    - /outputs/prd_review/review_matrix.md
+    code_health:
+      - /outputs/code_health/code_health_report.md
+    prd_review:
+      - /outputs/prd_review/prd_v2_final.md
+      - /outputs/prd_review/review_matrix.md
 code_health:
   project_root: /workspace/project
   source_path: {sandbox_source_path}
@@ -387,13 +421,26 @@ def print_middleware_debug(middleware: list[AgentMiddleware]) -> None:
         print(f"  - {item.name}")
 
 
-def print_expected_outputs(run_root: Path) -> None:
-    expected = [
-        run_root / "code_health" / "code_health_report.md",
-        run_root / "prd_review" / "prd_v2_final.md",
-        run_root / "prd_review" / "review_matrix.md",
-        run_root / "performance.json",
-    ]
+def observe_task_outputs(run_root: Path) -> ObservedTaskOutputs:
+    return ObservedTaskOutputs(
+        code_health=(run_root / "code_health" / "code_health_report.md").exists(),
+        prd_review=(
+            (run_root / "prd_review" / "prd_v2_final.md").exists()
+            or (run_root / "prd_review" / "review_matrix.md").exists()
+        ),
+    )
+
+
+def print_expected_outputs(run_root: Path, observed: ObservedTaskOutputs) -> None:
+    expected = []
+    if observed.code_health:
+        expected.append(run_root / "code_health" / "code_health_report.md")
+    if observed.prd_review:
+        expected.extend([
+            run_root / "prd_review" / "prd_v2_final.md",
+            run_root / "prd_review" / "review_matrix.md",
+        ])
+    expected.append(run_root / "performance.json")
     print("\n[debug] Expected output files")
     for path in expected:
         status = "OK" if path.exists() and path.stat().st_size > 0 else "MISSING"
@@ -1103,6 +1150,7 @@ Routing rules:
 
 Hard constraints:
 - Use only the task tool for delegation. Do not use ls, glob, grep, read_file, execute, write_file, or internet_search.
+- When delegating, pass the user's original request and any runtime environment context from the user message to the selected orchestrator.
 - Do not explore files, read source code, search the web, analyze code, write PRDs, or write reports.
 - After delegation, wait for the orchestrator result. Do not perform extra validation or file checks.
 - If other tools are visible, ignore them."""
@@ -1398,8 +1446,9 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     runtime_task = read_runtime_task()
-    code_project_path, code_target_rel, code_target_path = resolve_code_health_input(runtime_task)
+    code_project_path, code_target_rel, code_target_path, code_context_found = resolve_optional_code_context(runtime_task)
     code_target_path = (code_project_path if code_target_rel == "." else code_project_path / code_target_rel).resolve()
+    sandbox_project_path = code_project_path
     sandbox_code_target = (
         SANDBOX_PROJECT_ROOT if code_target_rel == "." else f"{SANDBOX_PROJECT_ROOT}/{code_target_rel}"
     )
@@ -1423,12 +1472,12 @@ def main():
         print("ERROR: DEEPSEEK_API_KEY not found")
         return
     if not code_project_path.exists():
-        print(f"ERROR: code project not found: {code_project_path}")
+        print(f"ERROR: sandbox project root not found: {code_project_path}")
         return
     if not code_project_path.is_dir():
-        print(f"ERROR: code project must be a directory: {code_project_path}")
+        print(f"ERROR: sandbox project root must be a directory: {code_project_path}")
         return
-    if not code_target_path.exists():
+    if code_context_found and not code_target_path.exists():
         print(f"ERROR: code target not found: {code_target_path}")
         return
 
@@ -1444,7 +1493,7 @@ def main():
     store = InMemoryStore()
     sandbox: AgentDockerSandbox | None = None
     try:
-        sandbox = AgentDockerSandbox(code_project_path, SKILLS_DIR, run_root)
+        sandbox = AgentDockerSandbox(sandbox_project_path, SKILLS_DIR, run_root)
     except Exception as exc:
         print(f"ERROR: Docker sandbox unavailable: {exc}")
         print("Run Docker Desktop, then rerun this demo in the llm-dev environment.")
@@ -1602,6 +1651,7 @@ def main():
         "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
+0. 用户运行时输入是唯一需求来源；不要假设任何固定测试用例、固定产品名、固定目标用户或固定场景。
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
 2. 作为 Writer，按 prd-writing skill 编写 PRD 初稿
 3. 必须先且仅调用 1 次 internet_search，将公开证据保存到 {prd_ws}/raw/web_search/writer-research.json；不要保存到其他 web_search 文件名
@@ -1622,6 +1672,7 @@ def main():
 9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
 
 硬约束：
+- PRD 主题、产品名称、目标用户、核心场景、范围边界和交付要求都必须来自用户运行时输入；如果用户没有提供，标为“待确认”，不要用 demo 示例补全
 - PRD 评审草稿只能是上述四个文件名；不要创建 review-product-completeness.md、review-technical-feasibility.md、review-ux.md、review-risk.md 或任何角色名别名文件
 - PRD 联网搜索预算只有两个保存路径：{prd_ws}/raw/web_search/writer-research.json 和 {prd_ws}/raw/web_search/product-strategy.json，各最多 1 次
 
@@ -1680,63 +1731,43 @@ PRD 使用中文撰写。""",
 - 如果用户同时要求两类任务，分别委托给两个 Orchestrator
 - 如果用户请求不属于上述两类，简短说明当前 demo 只支持 code-health 和 prd-review
 
+委托时必须把用户原始请求和消息中的运行时环境上下文原样传给对应 Orchestrator。
 你的职责只是识别任务类型并路由到正确的 Orchestrator。不要自己调用工具、读取文件、联网搜索、分析代码、撰写 PRD 或写入报告。""",
         subagents=subagent_specs,
     )
 
-    # ---- Run: Code Health ----
     print(f"\n{'─' * 60}")
-    print("Task 1: Code Health Scan")
-    print(f"Project: {code_project_path}")
-    print(f"Target:  {code_target_rel}")
-    print(f"User:    {runtime_task}")
+    print("Task: Main Router")
+    print(f"User: {runtime_task or '<empty>'}")
+    print(f"Code context: {'resolved' if code_context_found else 'not provided; /workspace/project is the demo root'}")
+    print(f"Project mount: {code_project_path}")
+    print(f"Target hint:   {code_target_rel}")
     print(f"{'─' * 60}")
 
     t0 = time.time()
-    code_config = {"configurable": {"thread_id": f"{run_id}:code-health"}}
+    main_config = {"configurable": {"thread_id": run_id}}
     resp = agent.invoke(
         {
             "messages": [{
                 "role": "user",
                 "content": (
                     f"{runtime_task}\n\n"
-                    "运行时解析信息："
-                    "代码项目已挂载到沙盒 `/workspace/project`；"
-                    f"扫描目标相对项目根路径是 `{code_target_rel}`；"
+                    "运行时环境上下文："
+                    "如果你判断这是 code-health 任务，代码项目已挂载到沙盒 `/workspace/project`；"
+                    f"可用的扫描目标相对项目根路径提示是 `{code_target_rel}`；"
                     "原始工具结果必须写入 `/outputs/code_health/raw/tool_results.json`。"
+                    "如果你判断这是 prd-review 任务，请完全基于用户输入编写和评审 PRD，"
+                    "不要使用任何内置测试示例或默认产品设定。"
+                    "如果用户同时要求两类任务，请分别委托两个 orchestrator；"
+                    "如果两类都不是，请直接说明当前 demo 只支持 code-health 和 prd-review。"
                 ),
             }],
         },
-        config=code_config,
+        config=main_config,
         version="v2",
     )
-    resp = handle_human_approval(agent, resp, code_config, "code-health")
-    t_code = time.time() - t0
-
-    # ---- Run: PRD Review ----
-    # print(f"\n{'─' * 60}")
-    # print("Task 2: PRD Review")
-    # print(f"{'─' * 60}")
-
-    # t1 = time.time()
-    # prd_config = {"configurable": {"thread_id": f"{run_id}:prd-review"}}
-    # resp = agent.invoke(
-    #     {
-    #         "messages": [{
-    #             "role": "user",
-    #             "content": (
-    #                 "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
-    #                 "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
-    #                 "同时提供校园活动推荐和实时拥挤度信息。"
-    #                 "写入标准 PRD v2 和评审矩阵。"
-    #             ),
-    #         }],
-    #     },
-    #     config=prd_config,
-    #     version="v2",
-    # )
-    # resp = handle_human_approval(agent, resp, prd_config, "prd-review")
-    # t_prd = time.time() - t1
+    resp = handle_human_approval(agent, resp, main_config, "main-router")
+    t_total = time.time() - t0
 
     # ---- Output ----
     print(f"\n{'=' * 60}")
@@ -1744,9 +1775,7 @@ PRD 使用中文撰写。""",
     # Performance
     m = metrics.to_dict()
     print(f"📊 Performance:")
-    print(f"   Code Health:   {t_code:.1f}s")
-    # print(f"   PRD Review:    {t_prd:.1f}s")
-    # print(f"   Total wall:    {t_code + t_prd:.1f}s")
+    print(f"   Total wall:    {t_total:.1f}s")
     print(f"   Model calls:   {m['model_calls']} (avg {m['model_avg_ms']}ms)")
     print(f"   Tool calls:    {m['tool_calls']} (avg {m['tool_avg_ms']}ms)")
     print(f"   Total tokens:  {m['total_tokens']}")
@@ -1760,7 +1789,7 @@ PRD 使用中文撰写。""",
     for f in sorted(run_root.rglob("*")):
         if f.is_file():
             print(f"   {f.relative_to(run_root)} ({f.stat().st_size} bytes)")
-    print_expected_outputs(run_root)
+    print_expected_outputs(run_root, observe_task_outputs(run_root))
 
     sandbox.close()
     print(f"\n✅ Aperio Integrated Demo complete!")
@@ -1769,5 +1798,3 @@ PRD 使用中文撰写。""",
 if __name__ == "__main__":
     main()
 
-# 测试用例
-# 对 full-stack-fastapi-template-master\backend\app\core 做完整的代码检查
