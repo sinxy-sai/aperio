@@ -40,6 +40,23 @@ description: Use when merging code-health drafts into the final Aperio code heal
 10. 如果 `tools.radon` 可用，必须在架构/可维护性部分引用圈复杂度和 Maintainability Index；如果 `tools.detect_secrets` 可用，必须在安全部分报告疑似密钥数量和复核结论。
 11. 如果架构草稿包含代码坏味道分析，必须合并到“代码坏味道与重构机会”小节；只报告有工具事实或源码证据支撑的异味，不要机械枚举完整坏味道清单。
 
+## 严重度规则
+
+- 最终报告的风险数量必须优先来自 `tool_results.json.findings_summary` 和 `tool_results.json.findings`。
+- 对每条工具发现，最终严重度不得高于 `findings[].severity`，除非草稿提供了明确源码位置、可复现影响和修复建议，并说明为什么工具等级不足；没有这三项时只能保持或降低严重度。
+- 如果 `tool_results.json.findings` 中没有 Critical，最终报告不要生成 Critical。只有存在明确可利用安全漏洞、真实密钥泄露、可复现数据破坏或生产阻断证据时，才允许 Critical。
+- High 以上发现必须同时具备：具体位置、证据来源、影响说明、最小修复建议。缺任一项时最高只能列为 Medium。
+- `interrogate` 的 docstring 覆盖率低、`coverage` 未运行、`pytest` 跳过、`pip-audit` 跳过、`mypy --ignore-missing-imports` 都属于覆盖限制或质量风险，不能单独升级为 Critical。
+- JWT 无吊销机制、日志/监控不足、架构可演进性不足这类人工判断，除非有源码证据证明直接导致高危安全结果，否则最高列为 Medium。
+- 草稿中的严重度如果高于工具事实，必须在合并时复核；无法复核时按工具事实降级，并在“覆盖范围与限制”中说明。
+
+## 范围规则
+
+- `findings[].in_target=true` 的发现属于本次目标范围，应进入主要风险概览。
+- `findings[].in_target=false` 的发现属于项目上下文，只能进入“项目上下文发现”或“覆盖范围与限制”，不要混入 `app/core` 的目标风险数量。
+- 报告必须明确展示 `findings_summary.target_total` 和 `findings_summary.project_context_total`。如果工具版本没有这些字段，则根据路径前缀人工区分。
+- 扫描目标是子目录时，健康度评分只代表该子目录；全项目依赖、测试、迁移脚本和疑似密钥扫描可以作为背景风险，但不得替代目标目录结论。
+
 ## 报告结构
 
 ```markdown
@@ -79,10 +96,11 @@ description: Use when merging code-health drafts into the final Aperio code heal
 
 ## 评分规则
 
-- 基础分 100。
-- Critical 每项 -20，High 每项 -10，Medium 每项 -4，Low 每项 -1。
-- 如果所有关键工具都未运行，最高 85 分。
+- 只使用“维度加权 + 覆盖限制降权”，不要再写逐项机械扣分公式。
+- 建议维度：静态质量 25、类型与依赖 20、安全 20、可维护性 20、测试与文档 15。
+- 每个维度按工具事实和草稿证据给 0-满分；工具跳过、超时、依赖未安装、只扫描子目录时，在对应维度降低置信度和分数上限。
+- 如果 `pip-audit`、`pytest`、`coverage` 因项目依赖未安装而跳过，依赖安全和测试维度不能给满分，也不能写成“无问题”。
+- 如果所有关键工具都未运行，最高 85 分；如果只有子目录扫描，必须说明评分只代表该扫描范围。
 - 如果 mypy 为轻量模式，不要把“未发现更多类型问题”写成“类型安全完整通过”。
 - 如果 pip-audit 超时或未运行，不要给出“依赖无已知漏洞”的结论。
 - 如果 pytest/coverage 未运行或失败，不要给出“测试覆盖充分”的结论。
-- 如果只扫描了子目录，必须说明评分只代表该扫描范围。

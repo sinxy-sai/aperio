@@ -316,6 +316,63 @@ def _interrupt_count(exc: GraphInterrupt) -> int:
         return 1
 
 
+def _normalize_virtual_path(path: str) -> str:
+    return "/" + path.replace("\\", "/").strip("/")
+
+
+def _normalize_shell_command(command: str) -> str:
+    return re.sub(r"\s+", " ", command.strip())
+
+
+def _redact_preview(value: str, limit: int = 240) -> str:
+    redacted = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization)\s*=\s*([^\s]+)",
+        r"\1=<redacted>",
+        value,
+    )
+    redacted = redacted.replace("\n", "\\n")
+    return redacted[:limit] + ("..." if len(redacted) > limit else "")
+
+
+def _tool_event_preview(tool_name: str, args: dict) -> dict:
+    if tool_name == "execute":
+        return {"command_preview": _redact_preview(str(args.get("command") or ""))}
+    if tool_name in {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}:
+        preview: dict[str, object] = {}
+        path = _write_file_path(args) or args.get("file_path") or args.get("path") or args.get("pattern")
+        if path:
+            preview["path"] = _redact_preview(str(path), limit=180)
+        if tool_name == "write_file":
+            preview["content_chars"] = len(str(args.get("content") or ""))
+        return preview
+    return {}
+
+
+_FINAL_WRITE_PATHS = {
+    "/outputs/code_health/code_health_report.md",
+    "/outputs/prd_review/prd_v2_final.md",
+    "/outputs/prd_review/review_matrix.md",
+}
+_AUTO_WRITE_PATH_RE = re.compile(
+    r"^/outputs/(?:"
+    r"code_health/drafts/(?:architect|security|dependencies|documentation)\.md"
+    r"|prd_review/prd_v1\.md"
+    r"|prd_review/drafts/review_(?:strategy|tech|ux|risk)\.md"
+    r")$"
+)
+
+
+def _write_requires_approval(request) -> bool:
+    """Require HITL for final artifacts and unexpected writes, not standard drafts."""
+    args = request.tool_call.get("args", {})
+    path = _normalize_virtual_path(_write_file_path(args))
+    if path in _FINAL_WRITE_PATHS:
+        return True
+    if _AUTO_WRITE_PATH_RE.fullmatch(path):
+        return False
+    return True
+
+
 _SAFE_MKDIR_RE = re.compile(
     r"^\s*mkdir\s+-p\s+(?:['\"]?(?:/outputs|/temp|/tmp)(?:/[^\s;&|<>]*)?['\"]?\s*)+$"
 )
@@ -817,6 +874,7 @@ class PerfMiddleware(AgentMiddleware):
                 "name": tool_name,
                 "ms": round(dt, 1),
             }
+            event.update(_tool_event_preview(tool_name, request.tool_call.get("args", {})))
             self.m.events.append(event)
             if self.verbose:
                 print(f"[debug] tool_call agent={self.agent_name} thread={thread_id} tool={tool_name} ms={event['ms']}")
@@ -829,6 +887,7 @@ class PerfMiddleware(AgentMiddleware):
                 "name": tool_name,
                 "interrupts": _interrupt_count(exc),
             }
+            event.update(_tool_event_preview(tool_name, request.tool_call.get("args", {})))
             self.m.events.append(event)
             if self.verbose:
                 print(f"[debug] tool_interrupt agent={self.agent_name} thread={thread_id} tool={tool_name}")
@@ -841,10 +900,81 @@ class PerfMiddleware(AgentMiddleware):
                 "name": tool_name,
                 "error": type(exc).__name__,
             }
+            event.update(_tool_event_preview(tool_name, request.tool_call.get("args", {})))
             self.m.events.append(event)
             if self.verbose:
                 print(f"[debug] tool_error agent={self.agent_name} thread={thread_id} tool={tool_name} error={type(exc).__name__}")
             raise
+
+
+class ToolAllowlistMiddleware(AgentMiddleware):
+    """Hide and block tools outside a role-specific allowlist."""
+
+    def __init__(self, allowed_tools: set[str], label: str):
+        super().__init__()
+        self.allowed_tools = allowed_tools
+        self.label = label
+
+    @staticmethod
+    def _tool_name(tool) -> str:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict) and function.get("name"):
+                return str(function["name"])
+            if tool.get("name"):
+                return str(tool["name"])
+            return ""
+        return str(getattr(tool, "name", ""))
+
+    def wrap_model_call(self, request, handler):
+        filtered_tools = [
+            tool
+            for tool in request.tools
+            if self._tool_name(tool) in self.allowed_tools
+        ]
+        return handler(request.override(tools=filtered_tools))
+
+    def wrap_tool_call(self, request, handler):
+        tool_name = request.tool_call.get("name", "")
+        if tool_name in self.allowed_tools:
+            return handler(request)
+        return ToolMessage(
+            content=f"{self.label}: tool `{tool_name}` is not allowed for this agent role.",
+            tool_call_id=request.tool_call["id"],
+            name=tool_name,
+            status="error",
+        )
+
+
+class FinalOutputGuardMiddleware(AgentMiddleware):
+    """Stop non-final follow-up tool calls after declared final artifacts are written."""
+
+    def __init__(self, final_paths: set[str], label: str, completed_paths: set[str] | None = None):
+        super().__init__()
+        self.final_paths = {_normalize_virtual_path(path) for path in final_paths}
+        self.label = label
+        self.completed_paths = completed_paths if completed_paths is not None else set()
+
+    def _is_complete(self) -> bool:
+        return bool(self.final_paths) and self.final_paths.issubset(self.completed_paths)
+
+    def wrap_tool_call(self, request, handler):
+        tool_name = request.tool_call.get("name", "")
+        args = request.tool_call.get("args", {})
+        if self._is_complete():
+            return ToolMessage(
+                content=f"{self.label}: final output was already written; stop without extra tool calls.",
+                tool_call_id=request.tool_call["id"],
+                name=tool_name,
+                status="error",
+            )
+
+        result = handler(request)
+        if tool_name == "write_file":
+            path = _normalize_virtual_path(_write_file_path(args))
+            if path in self.final_paths:
+                self.completed_paths.add(path)
+        return result
 
 
 class RouterToolGuardMiddleware(AgentMiddleware):
@@ -990,7 +1120,14 @@ def _install_observable_summarization_profile(*model_specs: str) -> None:
 # Sub-agent definitions
 # ---------------------------------------------------------------------------
 
-def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backend) -> list:
+def _code_health_subagents(
+    ws: str,
+    target: str,
+    metrics: Metrics,
+    model,
+    backend,
+    completed_final_paths: set[str],
+) -> list:
     """Return the 5 sub-agents for code health orchestration."""
     language_rule = "全文使用中文；工具名、文件路径、命令、错误码可以保留英文原文。"
     evidence_budget = (
@@ -999,6 +1136,10 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
         "需要读取时只使用 read_file 定向读取 tool_results.json 中出现的具体文件，最多 3 个文件；"
         "不要使用 ls、glob、grep 或 execute 做泛探索。"
     )
+    analysis_middleware = lambda agent_name: [
+        ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health leaf agent"),
+        *_agent_middleware(metrics, agent_name, model, backend),
+    ]
     return [
         {
             "name": "architect",
@@ -1011,7 +1152,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输出：只写入 Markdown 草稿 {ws}/drafts/architect.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
-            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.architect", model, backend),
+            "middleware": analysis_middleware("root.code-health-orchestrator.architect"),
         },
         {
             "name": "security-analyst",
@@ -1024,7 +1165,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输出：只写入 Markdown 草稿 {ws}/drafts/security.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
-            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.security-analyst", model, backend),
+            "middleware": analysis_middleware("root.code-health-orchestrator.security-analyst"),
         },
         {
             "name": "dependency-checker",
@@ -1034,11 +1175,11 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 你是依赖管理专家。按 code-dependency skill 检查 `{target}`。
 输入：先读取 {ws}/raw/tool_results.json，必要时读取依赖清单。
 {evidence_budget}
-联网：默认不要联网；只有 skill 允许且确有必要时最多调用 1 次 internet_search，save_path={ws}/raw/web_search/dependency-advisories.json。
+联网：不要调用 internet_search；本阶段只基于本地扫描事实和草稿证据。
 输出：只写入 Markdown 草稿 {ws}/drafts/dependencies.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
-            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.dependency-checker", model, backend),
+            "middleware": analysis_middleware("root.code-health-orchestrator.dependency-checker"),
         },
         {
             "name": "doc-reviewer",
@@ -1051,7 +1192,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输出：只写入 Markdown 草稿 {ws}/drafts/documentation.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
-            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.doc-reviewer", model, backend),
+            "middleware": analysis_middleware("root.code-health-orchestrator.doc-reviewer"),
         },
         {
             "name": "summarizer",
@@ -1064,7 +1205,15 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证；不要读取源码或做新的代码探索。
 完成写入后立即停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
-            "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health summarizer"),
+                FinalOutputGuardMiddleware(
+                    {f"{ws}/code_health_report.md"},
+                    "code-health summarizer",
+                    completed_final_paths,
+                ),
+                *_agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
+            ],
         },
     ]
 
@@ -1265,21 +1414,33 @@ def main():
             "allowed_decisions": ["approve", "reject"],
             "when": _execute_requires_approval,
         },
-        "write_file": {"allowed_decisions": ["approve", "reject"]},
+        "write_file": {
+            "allowed_decisions": ["approve", "reject"],
+            "when": _write_requires_approval,
+        },
     }
+    code_health_final_paths: set[str] = set()
 
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
         "skills": _agent_skills(_skill_dir("code-health")),
-        "middleware": _agent_middleware(metrics, "root.code-health-orchestrator", model, backend),
+        "middleware": [
+            ToolAllowlistMiddleware({"execute", "read_file", "task", "write_todos"}, "code-health orchestrator"),
+            FinalOutputGuardMiddleware(
+                {f"{code_ws}/code_health_report.md"},
+                "code-health orchestrator",
+                code_health_final_paths,
+            ),
+            *_agent_middleware(metrics, "root.code-health-orchestrator", model, backend),
+        ],
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。
 
 第一动作硬约束：
-1. 收到 code-health 任务后的第一个工具调用必须是 execute，且命令必须精确使用：
-   `python /skills/code-health/code-health-toolkit/scripts/run_checks.py --project-root {SANDBOX_PROJECT_ROOT} --target app/core --out {code_ws}/raw/tool_results.json --summary`
+1. 收到 code-health 任务后，先按 code-health-toolkit skill 运行确定性扫描，并把完整原始结果写入 {code_ws}/raw/tool_results.json。
+   扫描入口、project-root、target 和参数都由 code-health-toolkit skill、用户任务和本地策略确定；主编排器不要写死脚本路径或目标路径。
 2. 在 {code_ws}/raw/tool_results.json 生成之前，禁止调用 write_todos、task、ls、read_file、glob、grep、internet_search 或任何源码探索工具。
-3. 不要手写 ruff/mypy/bandit/radon/detect-secrets/deptry/interrogate 等单独命令替代 toolkit 脚本。
+3. 不要手写 ruff/mypy/bandit/radon/detect-secrets/deptry/interrogate 等单独命令替代 code-health-toolkit。
 4. 扫描成功后，先读取 {code_ws}/raw/tool_results.json；再使用 write_todos 规划后续编排。
 
 扫描后的工作流程：
@@ -1306,7 +1467,14 @@ def main():
 - 缺少任意一个草稿文件时，不要派发 summarizer，不要直接写最终报告
 - 不要写入 {code_ws}/drafts/code_health_report.md；drafts 目录只放四个角色草稿
 - 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",
-        "subagents": _code_health_subagents(code_ws, SANDBOX_TARGET_CODE, metrics, model, backend),
+        "subagents": _code_health_subagents(
+            code_ws,
+            SANDBOX_TARGET_CODE,
+            metrics,
+            model,
+            backend,
+            code_health_final_paths,
+        ),
     }
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",

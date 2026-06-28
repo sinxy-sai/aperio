@@ -225,6 +225,35 @@ def rel_location(path: str | None, project_root: Path, line: int | None = None, 
     return base
 
 
+def finding_scope(location: str, target_rel: str) -> tuple[str, bool]:
+    """Classify whether a normalized finding is inside the requested scan target."""
+    normalized = (location or "unknown").replace("\\", "/").strip()
+    path = normalized.split(":", 1)[0].strip()
+    target = target_rel.replace("\\", "/").strip().strip("/")
+
+    if not path or path == "unknown":
+        return "unknown", False
+    if target and (path == target or path.startswith(f"{target}/")):
+        return "target", True
+    if path == "tests" or path.startswith(("tests/", "test/", "__tests__/")):
+        return "tests", False
+    if "/alembic/" in f"/{path}/" or path.startswith(("alembic/", "migrations/")):
+        return "migration", False
+    if path in {"dependency", "dependencies"} or path.endswith(
+        (
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "poetry.lock",
+            "uv.lock",
+            "Pipfile",
+            "Pipfile.lock",
+        )
+    ):
+        return "dependency_manifest", False
+    return "project_context", False
+
+
 def add_finding(
     findings: list[dict[str, Any]],
     tool: str,
@@ -238,8 +267,10 @@ def add_finding(
     confidence: str = "medium",
     recommendation: str = "",
     raw: dict[str, Any] | None = None,
+    target_rel: str = "",
 ) -> None:
     index = 1 + sum(1 for item in findings if item.get("source_tool") == tool)
+    scope, in_target = finding_scope(location, target_rel)
     findings.append(
         {
             "id": f"CH-{tool.upper().replace('_', '-')}-{index:03d}",
@@ -248,6 +279,8 @@ def add_finding(
             "category": category,
             "severity": severity,
             "location": location,
+            "scope": scope,
+            "in_target": in_target,
             "message": message,
             "evidence_type": evidence_type,
             "confidence": confidence,
@@ -260,6 +293,7 @@ def add_finding(
 def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     tools = tool_results.get("tools", {})
+    target_rel = str(tool_results.get("target_rel") or "")
 
     for item in tools.get("ruff", {}).get("json", []) or []:
         location = item.get("location") or {}
@@ -274,6 +308,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
             confidence="high",
             recommendation="按 ruff 规则修复，或保留有明确理由的例外。",
             raw=item,
+            target_rel=target_rel,
         )
 
     mypy_pattern = re.compile(r"^(?P<file>.+?):(?P<line>\d+): (?P<level>error|note): (?P<message>.+?)(?:\s+\[(?P<code>[^\]]+)\])?$")
@@ -294,6 +329,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
             confidence="medium",
             recommendation="复核类型注解、第三方类型桩和 ignore；当前 mypy 使用 --ignore-missing-imports。",
             raw={"line": line.strip()},
+            target_rel=target_rel,
         )
 
     bandit_json = tools.get("bandit", {}).get("json") or {}
@@ -309,6 +345,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
             confidence=str(item.get("issue_confidence", "MEDIUM")).lower(),
             recommendation="结合上下文确认是否可利用；真实问题应按 Bandit 建议修复并补安全测试。",
             raw=item,
+            target_rel=target_rel,
         )
 
     pip_json = tools.get("pip_audit", {}).get("json") or {}
@@ -327,6 +364,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
                 confidence="high",
                 recommendation="升级到修复版本；如无 fix version，查阅公告并制定缓解方案。",
                 raw={"dependency": dep.get("name"), "version": dep.get("version"), "vulnerability": vuln},
+                target_rel=target_rel,
             )
 
     deptry_data = tools.get("deptry", {}).get("json_file", {}).get("data", [])
@@ -345,6 +383,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
             confidence="medium",
             recommendation="同步代码导入和依赖声明；项目依赖未安装时传递依赖判断可能不完整。",
             raw=item,
+            target_rel=target_rel,
         )
 
     interrogate_output = tools.get("interrogate", {}).get("output", "")
@@ -363,6 +402,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
                 confidence="high",
                 recommendation="为公开 API、配置入口和安全相关函数补充 docstring。",
                 raw={"coverage_percent": percent},
+                target_rel=target_rel,
             )
 
     radon_json = tools.get("radon", {}).get("cc", {}).get("json")
@@ -390,6 +430,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
                     confidence="high",
                     recommendation="拆分条件分支，提取职责明确的小函数，并补充复杂分支测试。",
                     raw=block,
+                    target_rel=target_rel,
                 )
 
     secrets_json = tools.get("detect_secrets", {}).get("json") or {}
@@ -407,6 +448,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
                 confidence="medium",
                 recommendation="人工复核是否为真实密钥；真实密钥应立即轮换并迁移到密钥管理或环境变量。",
                 raw={key: value for key, value in item.items() if key != "hashed_secret"},
+                target_rel=target_rel,
             )
 
     coverage_summary = tools.get("coverage", {}).get("summary", {})
@@ -424,6 +466,7 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
             confidence="high",
             recommendation="优先补充核心路径、错误分支和安全边界测试。",
             raw={"percent_covered": percent},
+            target_rel=target_rel,
         )
 
     return findings
@@ -488,12 +531,27 @@ def tool_coverage_summary(tools: dict[str, dict[str, Any]]) -> dict[str, dict[st
 def findings_summary(findings: list[dict[str, Any]]) -> dict[str, Any]:
     by_tool: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+    by_severity_in_target: dict[str, int] = {}
     by_category: dict[str, int] = {}
+    by_scope: dict[str, int] = {}
     for finding in findings:
         by_tool[finding["source_tool"]] = by_tool.get(finding["source_tool"], 0) + 1
         by_severity[finding["severity"]] = by_severity.get(finding["severity"], 0) + 1
+        if finding.get("in_target"):
+            by_severity_in_target[finding["severity"]] = by_severity_in_target.get(finding["severity"], 0) + 1
         by_category[finding["category"]] = by_category.get(finding["category"], 0) + 1
-    return {"total": len(findings), "by_tool": by_tool, "by_severity": by_severity, "by_category": by_category}
+        scope = finding.get("scope", "unknown")
+        by_scope[scope] = by_scope.get(scope, 0) + 1
+    return {
+        "total": len(findings),
+        "target_total": sum(1 for finding in findings if finding.get("in_target")),
+        "project_context_total": sum(1 for finding in findings if not finding.get("in_target")),
+        "by_tool": by_tool,
+        "by_severity": by_severity,
+        "by_severity_in_target": by_severity_in_target,
+        "by_category": by_category,
+        "by_scope": by_scope,
+    }
 
 
 def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> dict[str, Any]:
