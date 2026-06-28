@@ -10,12 +10,14 @@ Architecture:
     │     ├── doc-reviewer        (async, skill: code-documentation)
     │     └── summarizer          (sync,  skill: report-writing-code-health)
     │
-    └── prd-review-orchestrator   (sync)
-          ├── product-strategist  (async, skill: review-ops)
-          ├── technical-feasibility(async,skill: review-tech)
-          ├── ux-researcher       (async, skill: review-ux)
-          ├── risk-analyst        (async, skill: review-risk)
-          └── editor              (sync,  skill: report-writing-prd + review-matrix)
+    ├── prd-review-orchestrator   (sync)
+    │     ├── product-strategist  (async, skill: review-ops)
+    │     ├── technical-feasibility(async,skill: review-tech)
+    │     ├── ux-researcher       (async, skill: review-ux)
+    │     ├── risk-analyst        (async, skill: review-risk)
+    │     └── editor              (sync,  skill: report-writing-prd + review-matrix)
+    │
+    └── general-purpose           (sync,  skill: web-search)
 
 Usage:
   conda activate llm-dev
@@ -31,7 +33,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sys
 import tarfile
 import time
@@ -52,6 +53,9 @@ from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
     FileData,
+    FileDownloadResponse,
+    FileInfo,
+    FileUploadResponse,
     GlobResult,
     GrepResult,
     LsResult,
@@ -305,19 +309,18 @@ def _safe_skill_source_name(agent_name: str) -> str:
 
 
 class AgentSkillSources:
-    """Build per-agent DeepAgents skill source directories.
+    """Register per-agent DeepAgents skill source directories.
 
     DeepAgents expects each `skills` entry to be a source directory containing
-    skill subdirectories, not a single skill directory. This materializes a
-    small source per agent so subagents see only the skills explicitly assigned
-    to them while bundled scripts can still reference the original /skills tree.
+    skill subdirectories, not a single skill directory. This registry gives
+    each agent a virtual source whose children are mapped to a whitelist of
+    real skill packages under SKILLS_DIR.
     """
 
     virtual_root = "/agent-skills"
 
-    def __init__(self, run_root: Path) -> None:
-        self.host_root = run_root / "agent_skills"
-        self.host_root.mkdir(parents=True, exist_ok=True)
+    def __init__(self) -> None:
+        self.sources: dict[str, dict[str, Path]] = {}
 
     def source(self, agent_name: str, *role_refs: str, shared_refs: tuple[str, ...] = ()) -> list[str]:
         refs = _agent_skill_refs(*role_refs, shared_refs=shared_refs)
@@ -325,19 +328,117 @@ class AgentSkillSources:
             return []
 
         source_name = _safe_skill_source_name(agent_name)
-        source_root = self.host_root / source_name
-        if source_root.exists():
-            shutil.rmtree(source_root)
-        source_root.mkdir(parents=True, exist_ok=True)
-
+        allowed: dict[str, Path] = {}
         for ref in refs:
             src = (SKILLS_DIR / ref).resolve()
             if not (src / "SKILL.md").exists():
                 raise FileNotFoundError(f"skill not found or missing SKILL.md: {src}")
-            dst = source_root / src.name
-            shutil.copytree(src, dst)
+            allowed[src.name] = src
 
+        self.sources[source_name] = allowed
         return [f"{self.virtual_root}/{source_name}"]
+
+
+class AgentSkillBackend:
+    """Read-only virtual backend for per-agent skill isolation."""
+
+    def __init__(self, registry: AgentSkillSources) -> None:
+        self.registry = registry
+
+    @staticmethod
+    def _parts(path: str) -> list[str]:
+        normalized = path.replace("\\", "/").strip("/")
+        parts = normalized.split("/") if normalized else []
+        if parts and parts[0] == "agent-skills":
+            parts = parts[1:]
+        return parts
+
+    def _resolve(self, path: str) -> Path | None:
+        parts = self._parts(path)
+        if len(parts) < 2:
+            return None
+        source_name, skill_name, *rest = parts
+        skill_root = self.registry.sources.get(source_name, {}).get(skill_name)
+        if skill_root is None:
+            return None
+        candidate = (skill_root / Path(*rest)).resolve() if rest else skill_root
+        try:
+            candidate.relative_to(skill_root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _virtual_path(self, source_name: str, skill_name: str, real_path: Path) -> str:
+        skill_root = self.registry.sources[source_name][skill_name]
+        rel = real_path.resolve().relative_to(skill_root).as_posix()
+        suffix = "" if rel == "." else f"/{rel}"
+        return f"/{source_name}/{skill_name}{suffix}"
+
+    def ls(self, path: str) -> LsResult:
+        parts = self._parts(path)
+        if len(parts) == 1:
+            source_name = parts[0]
+            skills = self.registry.sources.get(source_name)
+            if skills is None:
+                return LsResult(error=f"skill source not found: {path}", entries=[])
+            entries: list[FileInfo] = [
+                {"path": f"/{source_name}/{skill_name}", "is_dir": True}
+                for skill_name in sorted(skills)
+            ]
+            return LsResult(entries=entries, error=None)
+
+        resolved = self._resolve(path)
+        if resolved is None or not resolved.exists():
+            return LsResult(error=f"path not found: {path}", entries=[])
+        if not resolved.is_dir():
+            return LsResult(error=f"not a directory: {path}", entries=[])
+
+        source_name, skill_name = parts[0], parts[1]
+        entries = []
+        for child in sorted(resolved.iterdir(), key=lambda item: item.name):
+            is_dir = child.is_dir()
+            entry: FileInfo = {
+                "path": self._virtual_path(source_name, skill_name, child),
+                "is_dir": is_dir,
+            }
+            if child.is_file():
+                entry["size"] = child.stat().st_size
+            entries.append(entry)
+        return LsResult(entries=entries, error=None)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        resolved = self._resolve(file_path)
+        if resolved is None or not resolved.is_file():
+            return ReadResult(error=f"file not found: {file_path}")
+        try:
+            content = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ReadResult(error=f"file is not utf-8 text: {file_path}")
+        lines = content.splitlines(keepends=True)
+        if offset:
+            lines = lines[offset:]
+        if limit is not None:
+            lines = lines[:limit]
+        return ReadResult(file_data=FileData(content="".join(lines), encoding="utf-8"), error=None)
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        responses: list[FileDownloadResponse] = []
+        for path in paths:
+            resolved = self._resolve(path)
+            if resolved is None or not resolved.is_file():
+                responses.append(FileDownloadResponse(path=path, error="file_not_found"))
+                continue
+            responses.append(FileDownloadResponse(path=path, content=resolved.read_bytes(), error=None))
+        return responses
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error="agent skill backend is read-only", path=None)
+
+    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        return EditResult(error="agent skill backend is read-only", path=None)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [FileUploadResponse(path=path, error="agent skill backend is read-only") for path, _ in files]
 
 
 def setup_local_resources(code_target_rel: str = ".") -> Path:
@@ -431,7 +532,7 @@ def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDo
     print(f"  default: DockerSandbox image={sandbox.image} container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
     print(f"  /inputs/ -> FilesystemBackend({run_root / 'inputs'}) [write denied]")
     print(f"  /outputs/ -> FilesystemBackend({run_root})")
-    print(f"  /agent-skills/ -> FilesystemBackend({run_root / 'agent_skills'})")
+    print("  /agent-skills/ -> AgentSkillBackend(read-only virtual skill views)")
     print("  /memories/ -> StoreBackend(namespace=aperio)")
     print("  /temp/ -> StateBackend()")
     print(f"  /local-resources/ -> FilesystemBackend({local_resources}) [write denied]")
@@ -1713,7 +1814,7 @@ def main():
     input_bundle_path = write_input_bundle(run_root, input_bundle)
     (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
     (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
-    skill_sources = AgentSkillSources(run_root)
+    skill_sources = AgentSkillSources()
 
     # ---- Backend (M4 + M5) ----
     store = InMemoryStore()
@@ -1731,7 +1832,7 @@ def main():
         routes={
             "/inputs/": FilesystemBackend(root_dir=str(run_root / "inputs"), virtual_mode=True),
             "/outputs/": FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
-            "/agent-skills/": FilesystemBackend(root_dir=str(run_root / "agent_skills"), virtual_mode=True),
+            "/agent-skills/": AgentSkillBackend(skill_sources),
             "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
             "/temp/": StateBackend(),
             "/local-resources/": FilesystemBackend(root_dir=str(local_resources), virtual_mode=True),
