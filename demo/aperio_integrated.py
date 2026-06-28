@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import atexit
+import asyncio
 import io
 import json
 import os
@@ -63,7 +64,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_core.tools import tool
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
@@ -75,6 +75,7 @@ from langchain.agents.middleware import (
 from langgraph.config import get_config
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from deepagents.middleware.skills import _list_skills_with_errors
 from deepagents.middleware.summarization import SummarizationMiddleware, compute_summarization_defaults
 
@@ -92,11 +93,6 @@ DEFAULT_SANDBOX_IMAGE = "aperio-sandbox:py311-tools"
 SANDBOX_IMAGE = os.environ.get("APERIO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
 SANDBOX_DOCKERFILE = (_DEMO_DIR / "sandbox" / "Dockerfile").resolve()
 INSTALL_PROJECT_DEPS = os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0") == "1"
-PRD_REVIEW_SEARCH_BUDGET = {
-    "/outputs/prd_review/raw/web_search/writer-research.json": 1,
-    "/outputs/prd_review/raw/web_search/product-strategy.json": 1,
-}
-
 
 def _skill_dir(name: str) -> str:
     """Build a virtual skill source routed through CompositeBackend."""
@@ -624,9 +620,27 @@ class AgentDockerSandbox(SandboxBackendProtocol):
         self._sandbox.close()
 
 
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+def _load_mcp_tools(run_root: Path) -> list:
+    """Load host-side MCP tools for the current Aperio run."""
+    server_path = _DEMO_DIR / "mcp_web_search_server.py"
+    client = MultiServerMCPClient(
+        {
+            "web_search": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": [str(server_path)],
+                "cwd": str(_PROJECT_ROOT),
+                "env": {
+                    **os.environ,
+                    "APERIO_OUTPUTS_DIR": str(run_root),
+                    "FASTMCP_LOG_LEVEL": "ERROR",
+                    "PYTHONIOENCODING": "utf-8",
+                },
+            }
+        },
+        handle_tool_errors=True,
+    )
+    return asyncio.run(client.get_tools())
 
 
 # ---------------------------------------------------------------------------
@@ -1018,8 +1032,6 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    prd_review_search_counts: dict[str, int] = {}
-
     # ---- LangSmith ----
     # langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY", "")
     # langsmith_enabled = bool(langsmith_key)
@@ -1091,147 +1103,7 @@ def main():
         ),
     ]
 
-    @tool
-    def internet_search(query: str, max_results: int = 3, save_path: str = "") -> str:
-        """Host-side public web search with DuckDuckGo, optionally saving JSON evidence under /outputs/."""
-        query = (query or "").strip()
-        save_path = (save_path or "").strip().replace("\\", "/")
-        try:
-            config = get_config()
-            thread_id = str(config.get("configurable", {}).get("thread_id", ""))
-        except RuntimeError:
-            thread_id = ""
-        is_prd_review_thread = ":prd-review" in thread_id
-        if not query:
-            return json.dumps(
-                {"ok": False, "error": "query is empty", "results": []},
-                ensure_ascii=False,
-            )
-        if save_path and (
-            not save_path.startswith("/outputs/")
-            or not save_path.endswith(".json")
-            or "/../" in save_path
-            or save_path.startswith("/outputs/../")
-        ):
-            return json.dumps(
-                {
-                    "ok": False,
-                    "query": query,
-                    "error": "save_path must be a JSON file under /outputs/",
-                    "results": [],
-                },
-                ensure_ascii=False,
-            )
-        if is_prd_review_thread:
-            allowed = ", ".join(sorted(PRD_REVIEW_SEARCH_BUDGET))
-            if save_path not in PRD_REVIEW_SEARCH_BUDGET:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "query": query,
-                        "save_path": save_path,
-                        "error": f"PRD review web searches must save evidence to one allowed path: {allowed}",
-                        "results": [],
-                    },
-                    ensure_ascii=False,
-                )
-            current_count = prd_review_search_counts.get(save_path, 0)
-            max_count = PRD_REVIEW_SEARCH_BUDGET[save_path]
-            if current_count >= max_count:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "query": query,
-                        "save_path": save_path,
-                        "error": f"PRD review web search budget exceeded for {save_path}: {current_count}/{max_count}",
-                        "results": [],
-                    },
-                    ensure_ascii=False,
-                )
-        elif save_path.startswith("/outputs/prd_review/raw/web_search/"):
-            return json.dumps(
-                {
-                    "ok": False,
-                    "query": query,
-                    "save_path": save_path,
-                    "error": "PRD review web search evidence paths are only available in the prd-review thread",
-                    "results": [],
-                },
-                ensure_ascii=False,
-            )
-
-        try:
-            limit = max(1, min(int(max_results), 5))
-        except (TypeError, ValueError):
-            limit = 3
-
-        try:
-            from ddgs import DDGS
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "query": query,
-                    "error": f"ddgs is not available: {type(exc).__name__}: {exc}",
-                    "results": [],
-                },
-                ensure_ascii=False,
-            )
-
-        if save_path in PRD_REVIEW_SEARCH_BUDGET:
-            prd_review_search_counts[save_path] = prd_review_search_counts.get(save_path, 0) + 1
-
-        try:
-            with DDGS() as ddgs:
-                raw_results = list(
-                    ddgs.text(
-                        query,
-                        max_results=limit,
-                        safesearch="moderate",
-                    )
-                )
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "query": query,
-                    "error": f"search failed: {type(exc).__name__}: {exc}",
-                    "results": [],
-                },
-                ensure_ascii=False,
-            )
-
-        results = []
-        for item in raw_results[:limit]:
-            title = str(item.get("title") or "").strip()
-            snippet = str(item.get("body") or item.get("snippet") or "").strip()
-            url = str(item.get("href") or item.get("url") or "").strip()
-            if not title and not snippet and not url:
-                continue
-            results.append(
-                {
-                    "title": title,
-                    "snippet": snippet[:600],
-                    "url": url,
-                }
-            )
-
-        payload = {
-            "ok": True,
-            "query": query,
-            "max_results": limit,
-            "results": results,
-            "evidence_policy": (
-                "Use these as public web evidence only. Do not replace local "
-                "repository facts, tool results, or project files with web snippets."
-            ),
-        }
-        if save_path:
-            local_path = run_root / save_path.removeprefix("/outputs/")
-            _write_json(local_path, payload)
-            payload["saved_to"] = save_path
-
-        return json.dumps(payload, ensure_ascii=False)
+    custom_tools = _load_mcp_tools(run_root)
 
     # ---- Model ----
     primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
@@ -1283,7 +1155,6 @@ def main():
             exit_behavior="continue",
         ),
     ]
-    custom_tools = [internet_search]
     root_interrupt_on = {
         "execute": {"allowed_decisions": ["approve", "reject"]},
         "write_file": {"allowed_decisions": ["approve", "reject"]},
