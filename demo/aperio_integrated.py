@@ -1769,15 +1769,14 @@ def main():
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
-        "skills": _agent_skills(),
+        "skills": _agent_skills(_skill_dir("prd-review/prd-writing")),
         "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-2. 作为 Writer，必须先且仅调用 1 次 internet_search 检索目标产品相关的公开竞品、校园导航/室内导航/AR 导航/校园服务公开实践，并将原始搜索证据保存到 {prd_ws}/raw/web_search/writer-research.json；不要保存到其他 web_search 文件名
-3. 根据用户需求和联网证据，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
-   包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
-4. PRD 初稿中引用联网信息时必须标注“公开网络证据”，但不要把搜索摘要当作用户已经确认的需求
+2. 作为 Writer，按 prd-writing skill 编写 PRD 初稿
+3. 必须先且仅调用 1 次 internet_search，将公开证据保存到 {prd_ws}/raw/web_search/writer-research.json；不要保存到其他 web_search 文件名
+4. 根据用户需求和公开证据写入唯一 PRD 初稿 {prd_ws}/prd_v1.md；引用联网信息时必须标注“公开网络证据”，但不要把搜索摘要当作用户已经确认的需求
 5. 并行派发 4 个评审子代理：
    - product-strategist：产品策略
    - technical-feasibility：技术可行性
@@ -1849,16 +1848,10 @@ PRD 使用中文撰写。""",
 
 - 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
 - 如果用户要求**写 PRD、评审需求、产品需求文档**→ 委托给 prd-review-orchestrator
-- internet_search 是只读联网工具，可用于公开资料检索；不要用它替代本地文件、工具结果或用户输入事实
+- 如果用户同时要求两类任务，分别委托给两个 Orchestrator
+- 如果用户请求不属于上述两类，简短说明当前 demo 只支持 code-health 和 prd-review
 
-CompositeBackend 分层存储策略：
-1. 默认路径 → DockerSandbox，所有未匹配路径和 execute 工具都在隔离容器中执行
-2. /outputs/ → 本次运行的本地输出区，用于保存 code_health 和 prd_review 报告
-3. /temp/ → StateBackend，适合会话内临时文件
-4. /memories/ → StoreBackend，适合跨线程共享记忆和历史趋势
-5. /local-resources/ → 只读 FilesystemBackend，可读取 aperio_policy.yaml，但禁止写入
-
-你的职责只是识别任务类型并路由到正确的 Orchestrator，不要自己做分析。""",
+你的职责只是识别任务类型并路由到正确的 Orchestrator。不要自己调用工具、读取文件、联网搜索、分析代码、撰写 PRD 或写入报告。""",
         subagents=subagent_specs,
     )
 
