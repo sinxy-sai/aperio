@@ -20,6 +20,16 @@ triggers:
 - 不要把矩阵写入 `prd_v2_final.md` 后就结束；它必须是独立文件。
 - 不要创建 `final_report.md`、`merged` 文件或根目录 `/outputs/*.md`。
 
+## 输入契约
+
+- 只整合四个标准评审草稿：
+  - `/outputs/prd_review/drafts/review_strategy.md`
+  - `/outputs/prd_review/drafts/review_tech.md`
+  - `/outputs/prd_review/drafts/review_ux.md`
+  - `/outputs/prd_review/drafts/review_risk.md`
+- 不要从别名文件、角色名文件或 `final_report.md` 中补充矩阵内容。
+- 如果某个标准草稿缺失，在矩阵中标记该维度“未覆盖”，不要编造反馈。
+
 ## 矩阵格式
 
 | 序号 | 维度 | 严重度 | 问题 | 建议 | 状态 | 处理说明 |

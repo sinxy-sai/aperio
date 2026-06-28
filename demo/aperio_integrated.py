@@ -14,7 +14,7 @@ Architecture:
           ├── product-strategist  (async, skill: review-ops)
           ├── technical-feasibility(async,skill: review-tech)
           ├── ux-researcher       (async, skill: review-ux)
-          ├── risk-analyst        (async, skill: review-test)
+          ├── risk-analyst        (async, skill: review-risk)
           └── editor              (sync,  skill: report-writing + review-matrix)
 
 Usage:
@@ -73,6 +73,7 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
 )
 from langgraph.config import get_config
+from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from deepagents.middleware.skills import _list_skills_with_errors
 from deepagents.middleware.summarization import SummarizationMiddleware, compute_summarization_defaults
@@ -91,6 +92,10 @@ DEFAULT_SANDBOX_IMAGE = "aperio-sandbox:py311-tools"
 SANDBOX_IMAGE = os.environ.get("APERIO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
 SANDBOX_DOCKERFILE = (_DEMO_DIR / "sandbox" / "Dockerfile").resolve()
 INSTALL_PROJECT_DEPS = os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0") == "1"
+PRD_REVIEW_SEARCH_BUDGET = {
+    "/outputs/prd_review/raw/web_search/writer-research.json": 1,
+    "/outputs/prd_review/raw/web_search/product-strategy.json": 1,
+}
 
 
 def _skill_dir(name: str) -> str:
@@ -292,6 +297,28 @@ def _is_approval_choice(choice: str) -> bool:
     return normalized.startswith("a") or normalized == "yes" or normalized == "y"
 
 
+def _write_file_path(args: dict) -> str:
+    return str(
+        args.get("file_path")
+        or args.get("path")
+        or args.get("filepath")
+        or args.get("file")
+        or args.get("filename")
+        or args.get("name")
+        or ""
+    ).replace("\\", "/")
+
+
+def _interrupt_count(exc: GraphInterrupt) -> int:
+    if not exc.args:
+        return 0
+    interrupts = exc.args[0]
+    try:
+        return len(interrupts)
+    except TypeError:
+        return 1
+
+
 def handle_human_approval(agent, response, config: dict, label: str):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
@@ -305,15 +332,7 @@ def handle_human_approval(agent, response, config: dict, label: str):
                     command = action['args'].get('command', 'N/A')
                     print(f"     命令: {command}")
                 elif action['name'] == 'write_file':
-                    file_path = (
-                        action['args'].get('file_path')
-                        or action['args'].get('path')
-                        or action['args'].get('filepath')
-                        or action['args'].get('file')
-                        or action['args'].get('filename')
-                        or action['args'].get('name')
-                        or 'N/A'
-                    )
+                    file_path = _write_file_path(action['args']) or 'N/A'
                     print(f"     文件: {file_path}")
                     content = action['args'].get('content', '')
                     print(f"     内容: {str(content)[:200]}...")
@@ -953,6 +972,18 @@ class PerfMiddleware(AgentMiddleware):
             if self.verbose:
                 print(f"[debug] tool_call agent={self.agent_name} thread={thread_id} tool={tool_name} ms={event['ms']}")
             return result
+        except GraphInterrupt as exc:
+            event = {
+                "type": "tool_interrupt",
+                "agent": self.agent_name,
+                "thread_id": thread_id,
+                "name": tool_name,
+                "interrupts": _interrupt_count(exc),
+            }
+            self.m.events.append(event)
+            if self.verbose:
+                print(f"[debug] tool_interrupt agent={self.agent_name} thread={thread_id} tool={tool_name}")
+            raise
         except Exception as exc:
             event = {
                 "type": "tool_error",
@@ -1068,6 +1099,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 - 目录结构是否合理、模块粒度是否合适
 - 是否存在明显 import 问题、循环依赖风险、God Class
 - 分层是否清晰（API → 业务 → 数据）
+- 必须按 code-architect skill 的 `references/code-smells.md` 复核代码坏味道；只报告有工具事实或源码证据支撑的异味，并区分指标型证据和人工判断
 将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.architect", model, backend),
@@ -1154,8 +1186,9 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 - 市场定位是否清晰、是否有明确竞品
 - 商业价值和差异化在哪里
 - MVP 功能优先级是否合理
-- 可以按 web-search skill 使用 internet_search 检索公开竞品、市场和行业实践，并将需要引用的搜索证据保存到 {ws}/raw/web_search/；引用时必须保留链接，并说明这是公开资料补充，不是用户需求本身
-读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_strategy.md，输出中文摘要。""",
+- 必须最多调用 1 次 internet_search 补充公开竞品、市场和行业实践证据；save_path 只能是 {ws}/raw/web_search/product-strategy.json
+- 引用联网证据时必须保留链接，并说明这是公开资料补充，不是用户需求本身
+读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_strategy.md；不要写 review-product-completeness.md、product-strategist.md 或任何别名文件。输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
         },
@@ -1166,7 +1199,8 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 - 技术栈是否可行、是否需要大规模重构
 - API 设计是否清晰、性能预期是否合理
 - 是否有安全隐患
-读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_tech.md，输出中文摘要。""",
+- 不要调用 internet_search；技术可行性评审只基于 PRD 初稿和工程常识
+读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_tech.md；不要写 review-technical-feasibility.md、technical-feasibility.md 或任何别名文件。输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
         },
@@ -1176,7 +1210,8 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
             "system_prompt": f"""你是 UX 研究员。评审 PRD：
 - 用户操作路径是否最短、异常状态是否覆盖
 - 交互一致性、无障碍、信息架构
-读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_ux.md，输出中文摘要。""",
+- 不要调用 internet_search；UX 评审只基于 PRD 初稿和可用性原则
+读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_ux.md；不要写 review-ux.md、ux-researcher.md 或任何别名文件。输出中文摘要。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
         },
@@ -1186,16 +1221,17 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
             "system_prompt": f"""你是项目风险分析师。评审 PRD：
 - 时间线和资源风险、团队能力匹配
 - 数据隐私合规、用户采纳障碍
-读取 {ws}/prd_v1.md，将评审写入 {ws}/drafts/review_risk.md，输出中文摘要。""",
-            "skills": _agent_skills(_skill_dir("prd-review/review-test")),
+- 不要调用 internet_search；风险评估只基于 PRD 初稿和项目管理/合规常识
+读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_risk.md；不要写 risk-analyst.md、review-risk.md 或任何别名文件。输出中文摘要。""",
+            "skills": _agent_skills(_skill_dir("prd-review/review-risk")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
         },
         {
             "name": "editor",
             "description": "Merge all reviews into a final polished PRD v2 with review matrix",
             "system_prompt": f"""你是 PRD 编辑。任务：
-1. ls {ws}/drafts/ 发现所有评审报告
-2. read_file 逐个读取 + 读取 {ws}/prd_v1.md
+1. 读取 {ws}/prd_v1.md
+2. 只读取这四个标准评审草稿：{ws}/drafts/review_strategy.md、{ws}/drafts/review_tech.md、{ws}/drafts/review_ux.md、{ws}/drafts/review_risk.md；不要接受别名文件作为替代
 3. 综合反馈，生成修订版 PRD v2 → {ws}/prd_v2_final.md
 4. 生成评审矩阵 → {ws}/review_matrix.md
    （格式：序号 | 维度 | 严重度 | 问题 | 建议 | 状态）
@@ -1223,6 +1259,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     code_health_check_cache: dict[str, str] = {}
+    prd_review_search_counts: dict[str, int] = {}
 
     # ---- LangSmith ----
     # langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY", "")
@@ -1541,6 +1578,12 @@ def main():
         """Host-side public web search with DuckDuckGo, optionally saving JSON evidence under /outputs/."""
         query = (query or "").strip()
         save_path = (save_path or "").strip().replace("\\", "/")
+        try:
+            config = get_config()
+            thread_id = str(config.get("configurable", {}).get("thread_id", ""))
+        except RuntimeError:
+            thread_id = ""
+        is_prd_review_thread = ":prd-review" in thread_id
         if not query:
             return json.dumps(
                 {"ok": False, "error": "query is empty", "results": []},
@@ -1557,6 +1600,43 @@ def main():
                     "ok": False,
                     "query": query,
                     "error": "save_path must be a JSON file under /outputs/",
+                    "results": [],
+                },
+                ensure_ascii=False,
+            )
+        if is_prd_review_thread:
+            allowed = ", ".join(sorted(PRD_REVIEW_SEARCH_BUDGET))
+            if save_path not in PRD_REVIEW_SEARCH_BUDGET:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "query": query,
+                        "save_path": save_path,
+                        "error": f"PRD review web searches must save evidence to one allowed path: {allowed}",
+                        "results": [],
+                    },
+                    ensure_ascii=False,
+                )
+            current_count = prd_review_search_counts.get(save_path, 0)
+            max_count = PRD_REVIEW_SEARCH_BUDGET[save_path]
+            if current_count >= max_count:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "query": query,
+                        "save_path": save_path,
+                        "error": f"PRD review web search budget exceeded for {save_path}: {current_count}/{max_count}",
+                        "results": [],
+                    },
+                    ensure_ascii=False,
+                )
+        elif save_path.startswith("/outputs/prd_review/raw/web_search/"):
+            return json.dumps(
+                {
+                    "ok": False,
+                    "query": query,
+                    "save_path": save_path,
+                    "error": "PRD review web search evidence paths are only available in the prd-review thread",
                     "results": [],
                 },
                 ensure_ascii=False,
@@ -1579,6 +1659,9 @@ def main():
                 },
                 ensure_ascii=False,
             )
+
+        if save_path in PRD_REVIEW_SEARCH_BUDGET:
+            prd_review_search_counts[save_path] = prd_review_search_counts.get(save_path, 0) + 1
 
         try:
             with DDGS() as ddgs:
@@ -1729,7 +1812,7 @@ def main():
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 1. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-2. 作为 Writer，必须先调用 internet_search 检索目标产品相关的公开竞品、校园导航/室内导航/AR 导航/校园服务公开实践，并将原始搜索证据保存到 {prd_ws}/raw/web_search/writer-research.json
+2. 作为 Writer，必须先且仅调用 1 次 internet_search 检索目标产品相关的公开竞品、校园导航/室内导航/AR 导航/校园服务公开实践，并将原始搜索证据保存到 {prd_ws}/raw/web_search/writer-research.json；不要保存到其他 web_search 文件名
 3. 根据用户需求和联网证据，自己作为 Writer 编写 PRD 初稿 → {prd_ws}/prd_v1.md
    包含：产品概述、用户画像、核心功能（P0/P1/P2）、用户故事、成功指标、非功能需求
 4. PRD 初稿中引用联网信息时必须标注“公开网络证据”，但不要把搜索摘要当作用户已经确认的需求
@@ -1738,11 +1821,19 @@ def main():
    - technical-feasibility：技术可行性
    - ux-researcher：用户体验
    - risk-analyst：风险评估
-   每个子代理读取 {prd_ws}/prd_v1.md，将评审写入 {prd_ws}/drafts/
+   每个子代理读取 {prd_ws}/prd_v1.md，将评审写入固定文件：
+   - product-strategist → {prd_ws}/drafts/review_strategy.md，最多 1 次 internet_search，save_path={prd_ws}/raw/web_search/product-strategy.json
+   - technical-feasibility → {prd_ws}/drafts/review_tech.md，不要调用 internet_search
+   - ux-researcher → {prd_ws}/drafts/review_ux.md，不要调用 internet_search
+   - risk-analyst → {prd_ws}/drafts/review_risk.md，不要调用 internet_search
 6. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
 7. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
 8. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
 9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
+
+硬约束：
+- PRD 评审草稿只能是上述四个文件名；不要创建 review-product-completeness.md、review-technical-feasibility.md、review-ux.md、review-risk.md 或任何角色名别名文件
+- PRD 联网搜索预算只有两个保存路径：{prd_ws}/raw/web_search/writer-research.json 和 {prd_ws}/raw/web_search/product-strategy.json，各最多 1 次
 
 PRD 使用中文撰写。""",
         "subagents": _prd_review_subagents(prd_ws, metrics, model, backend),

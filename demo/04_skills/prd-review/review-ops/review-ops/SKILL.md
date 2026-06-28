@@ -24,10 +24,18 @@ triggers:
 
 ## 联网证据规则
 
-- 可使用 `internet_search` 检索公开竞品、市场和行业实践。
+- 最多调用 1 次 `internet_search` 检索公开竞品、市场和行业实践。
+- 如果调用 `internet_search`，`save_path` 必须是 `/outputs/prd_review/raw/web_search/product-strategy.json`。
 - 引用搜索结果时必须保留链接，并标注为“公开资料补充”。
 - 不要把搜索摘要写成用户已经确认的需求；用户输入和 PRD 原文优先级更高。
 - 联网失败时直接说明未覆盖，不要编造竞品或市场证据。
+
+## 输出契约
+
+- 读取 `/outputs/prd_review/prd_v1.md`。
+- 唯一草稿输出路径是 `/outputs/prd_review/drafts/review_strategy.md`。
+- 不要创建 `review-product-completeness.md`、`product-strategist.md`、`review-ops.md`、`review-strategy.md` 或任何别名文件。
+- 草稿必须全文使用中文。
 
 ## 输出格式
 

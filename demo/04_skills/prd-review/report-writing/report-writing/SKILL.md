@@ -21,6 +21,17 @@ triggers:
 - 不要创建 `final_report.md`、`merged-report.md`、根目录 `/outputs/*.md` 或其他别名文件。
 - 两个标准文件写入成功后立即结束，不要再用 `execute` 验证、复制、重写或另存输出文件。
 
+## 输入契约
+
+- 必须读取 `/outputs/prd_review/prd_v1.md`。
+- 只能把这四个评审草稿作为有效输入：
+  - `/outputs/prd_review/drafts/review_strategy.md`
+  - `/outputs/prd_review/drafts/review_tech.md`
+  - `/outputs/prd_review/drafts/review_ux.md`
+  - `/outputs/prd_review/drafts/review_risk.md`
+- 不要接受 `review-product-completeness.md`、`review-technical-feasibility.md`、`review-ux.md`、`review-risk.md` 或角色名文件作为替代输入。
+- 如果任意标准草稿缺失，应在结果中说明缺失并降低置信度，不要用别名文件静默替代。
+
 ## 合并原则
 
 1. 先保留 PRD 初稿中已经明确的背景、目标、用户、范围和约束。

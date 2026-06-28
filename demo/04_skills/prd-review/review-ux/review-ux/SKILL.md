@@ -22,6 +22,14 @@ triggers:
 5. **信息架构**: 导航和信息层级是否符合用户心智模型？
 6. **响应式**: 是否考虑了不同屏幕尺寸的适配？
 
+## 证据与输出契约
+
+- 读取 `/outputs/prd_review/prd_v1.md`。
+- 不要调用 `internet_search`；UX 评审基于 PRD 初稿和可用性原则。
+- 唯一草稿输出路径是 `/outputs/prd_review/drafts/review_ux.md`。
+- 不要创建 `review-ux.md`、`ux-researcher.md`、`review-user-experience.md` 或任何别名文件。
+- 草稿必须全文使用中文。
+
 ## 输出格式
 
 | 序号 | 维度 | 严重度 | 问题描述 | 建议 |
