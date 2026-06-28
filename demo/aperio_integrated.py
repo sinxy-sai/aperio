@@ -2039,3 +2039,6 @@ PRD 使用中文撰写。""",
 if __name__ == "__main__":
     main()
 
+# 两个输入测试
+# 我需要为「智慧校园导航助手」写一份 PRD 并评审。这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，同时提供校园活动推荐和实时拥挤度信息。
+# 对full-stack-fastapi-template-master\backend\app\core做完整的代码检查。
