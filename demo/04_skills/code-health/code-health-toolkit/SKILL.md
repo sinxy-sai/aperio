@@ -18,7 +18,11 @@ After `tool_results.json` exists, use its `discovery`, `tool_coverage`, and `fin
 Run:
 
 ```bash
-python scripts/run_checks.py --project-root . --target app
+python scripts/run_checks.py \
+  --project-root <project-root> \
+  --target <target-relative-path> \
+  --out <output-json-path> \
+  --summary
 ```
 
 Optional flags:
@@ -27,17 +31,25 @@ Optional flags:
 - `--out <path>`: write the full JSON result to a file while also printing JSON to stdout.
 - `--summary`: when `--out` is used, print only a compact summary to stdout while preserving the full JSON in the output file.
 
+Parameter rules:
+
+- Replace every `<...>` placeholder from the current task context. Do not copy placeholders literally.
+- `--project-root` is the root of the project being scanned, usually the directory that contains dependency manifests such as `pyproject.toml`, `requirements.txt`, or `poetry.lock`.
+- `--target` is a path relative to `--project-root`. Use the target requested by the user, the orchestrator, or the local policy. Use `.` only when the whole project should be scanned.
+- Do not assume a fixed target such as `app`, `src`, or `app/core`; those are project-specific choices.
+- `--out` is the workflow's raw evidence file path. In a report workflow, write the full result to a stable JSON artifact before drafting analysis.
+
 In an environment that exposes this skill at `/skills`, run:
 
 ```bash
 python /skills/code-health/code-health-toolkit/scripts/run_checks.py \
-  --project-root /workspace/project \
-  --target app/core \
-  --out /outputs/code_health/raw/tool_results.json \
+  --project-root <sandbox-project-root> \
+  --target <target-relative-path> \
+  --out <output-json-path> \
   --summary
 ```
 
-In Aperio, `/skills` is mounted read-only and `/outputs` is mounted to the local run workspace. Do not call individual scanners directly when this script is available; use the script as the stable entrypoint.
+In Aperio-like sandboxes, `/skills` is usually mounted read-only and `/outputs` is usually mounted to the local run workspace. Read the active orchestrator instructions or local policy to determine the actual project root, target path, and output path. Do not call individual scanners directly when this script is available; use the script as the stable entrypoint.
 
 ## Output Schema
 
