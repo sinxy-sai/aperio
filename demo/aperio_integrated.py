@@ -1104,10 +1104,16 @@ class AgentDockerSandbox(SandboxBackendProtocol):
         self._sandbox.close()
 
 
-def _load_mcp_tools(run_root: Path) -> list:
+@dataclass(frozen=True)
+class McpToolset:
+    shared: list
+    general_purpose: list
+
+
+def _load_mcp_tools(run_root: Path) -> McpToolset:
     """Load host-side MCP tools for the current Aperio run."""
     server_path = _DEMO_DIR / "mcp_web_search_server.py"
-    client = MultiServerMCPClient(
+    web_search_client = MultiServerMCPClient(
         {
             "web_search": {
                 "transport": "stdio",
@@ -1120,11 +1126,29 @@ def _load_mcp_tools(run_root: Path) -> list:
                     "FASTMCP_LOG_LEVEL": "ERROR",
                     "PYTHONIOENCODING": "utf-8",
                 },
-            }
+            },
         },
         handle_tool_errors=True,
     )
-    return [_sync_tool_for_invoke(tool) for tool in asyncio.run(client.get_tools())]
+    shared_tools = [_sync_tool_for_invoke(tool) for tool in asyncio.run(web_search_client.get_tools())]
+
+    amap_key = os.environ.get("AMAP_API_KEY", "").strip()
+    amap_tools = []
+    if amap_key:
+        amap_client = MultiServerMCPClient(
+            {
+                "amap": {
+                    "url": f"https://mcp.amap.com/sse?key={amap_key}",
+                    "transport": "sse",
+                },
+            },
+            handle_tool_errors=True,
+        )
+        amap_tools = [_sync_tool_for_invoke(tool) for tool in asyncio.run(amap_client.get_tools())]
+    else:
+        print("Amap MCP: AMAP_API_KEY not configured; general-purpose map tools disabled")
+
+    return McpToolset(shared=shared_tools, general_purpose=amap_tools)
 
 
 def _sync_tool_for_invoke(tool):
@@ -1858,7 +1882,9 @@ def main():
         ),
     ]
 
-    custom_tools = _load_mcp_tools(run_root)
+    mcp_tools = _load_mcp_tools(run_root)
+    custom_tools = mcp_tools.shared
+    general_purpose_tools = [*mcp_tools.shared, *mcp_tools.general_purpose]
 
     # ---- Model ----
     primary_model_name = os.environ.get("APERIO_PRIMARY_MODEL", "openai:deepseek-v4-flash")
@@ -2085,7 +2111,7 @@ PRD 使用中文撰写。""",
     general_purpose = _general_purpose_agent(metrics, model, backend, skill_sources)
     general_purpose["runnable"] = create_deep_agent(
         model=model,
-        tools=custom_tools,
+        tools=general_purpose_tools,
         backend=backend,
         checkpointer=checkpointer,
         middleware=general_purpose["middleware"],
@@ -2105,7 +2131,7 @@ PRD 使用中文撰写。""",
     print_backend_debug(run_root, local_resources, sandbox)
     print_sandbox_tool_debug(sandbox)
     print_subagent_debug(subagent_specs, backend)
-    print_tool_debug(subagent_specs, custom_tools)
+    print_tool_debug(subagent_specs, [*custom_tools, *mcp_tools.general_purpose])
     print_subagent_middleware_debug(subagent_specs)
     print_middleware_debug(user_middleware)
 
