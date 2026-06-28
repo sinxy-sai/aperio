@@ -316,6 +316,45 @@ def _interrupt_count(exc: GraphInterrupt) -> int:
         return 1
 
 
+_SAFE_MKDIR_RE = re.compile(
+    r"^\s*mkdir\s+-p\s+(?:['\"]?(?:/outputs|/temp|/tmp)(?:/[^\s;&|<>]*)?['\"]?\s*)+$"
+)
+_HIGH_RISK_EXECUTE_RE = re.compile(
+    r"""
+    (^|[\s;&|])(rm|rmdir|unlink|shred|mkdir|mv|cp|chmod|chown|chgrp|truncate|dd|mkfs|mount|umount|sudo|docker|podman)\b
+    |\b(pip|pip3|uv|poetry|pipenv|conda|npm|pnpm|yarn|bun|apt|apt-get|apk|yum|dnf|brew|cargo|go)\s+(install|add|remove|uninstall|update|upgrade|sync|get|mod)\b
+    |\bgit\s+(reset|clean|checkout|restore|switch|pull|merge|rebase|push|commit|tag)\b
+    |(^|[\s;&|])tee\s+
+    |(?:>>?|<)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_INLINE_CODE_EXECUTE_RE = re.compile(
+    r"\b(python|python3|node|ruby|perl|bash|sh)\s+(-c|-m\s+pip|<<|-)\b",
+    re.IGNORECASE,
+)
+
+
+def _execute_requires_approval(request) -> bool:
+    """Return True only for high-risk shell commands.
+
+    Low-risk read commands and output-directory setup should not trigger HITL;
+    destructive operations, dependency installs, shell redirection, and inline
+    code still require human approval.
+    """
+    args = request.tool_call.get("args", {})
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return True
+    if _SAFE_MKDIR_RE.fullmatch(command):
+        return False
+    if _HIGH_RISK_EXECUTE_RE.search(command):
+        return True
+    if _INLINE_CODE_EXECUTE_RE.search(command):
+        return True
+    return False
+
+
 def handle_human_approval(agent, response, config: dict, label: str):
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
@@ -1215,7 +1254,10 @@ def main():
         ),
     ]
     root_interrupt_on = {
-        "execute": {"allowed_decisions": ["approve", "reject"]},
+        "execute": {
+            "allowed_decisions": ["approve", "reject"],
+            "when": _execute_requires_approval,
+        },
         "write_file": {"allowed_decisions": ["approve", "reject"]},
     }
 
