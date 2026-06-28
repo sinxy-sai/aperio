@@ -1768,3 +1768,6 @@ PRD 使用中文撰写。""",
 
 if __name__ == "__main__":
     main()
+
+# 测试用例
+# 对 full-stack-fastapi-template-master\backend\app\core 做完整的代码检查
