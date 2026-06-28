@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import atexit
+import argparse
 import asyncio
 import io
 import json
@@ -86,14 +87,38 @@ from deepagents.middleware.summarization import SummarizationMiddleware, compute
 WORKSPACE_ROOT = (_PROJECT_ROOT / "demo/workspace_integrated").resolve()
 SKILLS_DIR = _DEMO_DIR / "04_skills"
 LOCAL_RESOURCES_DIR = _DEMO_DIR / "local_resources"
-TARGET_PROJECT = "full-stack-fastapi-template-master/backend"
-TARGET_CODE = f"{TARGET_PROJECT}/app/core"
 SANDBOX_PROJECT_ROOT = "/workspace/project"
-SANDBOX_TARGET_CODE = f"{SANDBOX_PROJECT_ROOT}/app/core"
 DEFAULT_SANDBOX_IMAGE = "aperio-sandbox:py311-tools"
 SANDBOX_IMAGE = os.environ.get("APERIO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
 SANDBOX_DOCKERFILE = (_DEMO_DIR / "sandbox" / "Dockerfile").resolve()
 INSTALL_PROJECT_DEPS = os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0") == "1"
+
+
+def _resolve_host_path(path: str) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = _PROJECT_ROOT / candidate
+    return candidate.resolve()
+
+
+def _normalize_relative_path(path: str) -> str:
+    normalized = path.replace("\\", "/").strip().strip("/")
+    return "." if normalized in {"", "."} else normalized
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Aperio integrated demo.")
+    parser.add_argument(
+        "--code-project",
+        default=os.environ.get("APERIO_CODE_PROJECT", "."),
+        help="Host-side project root to mount into the sandbox. Defaults to APERIO_CODE_PROJECT or current repo root.",
+    )
+    parser.add_argument(
+        "--code-target",
+        default=os.environ.get("APERIO_CODE_TARGET", "."),
+        help="Code-health scan target relative to --code-project. Defaults to APERIO_CODE_TARGET or the whole mounted project.",
+    )
+    return parser.parse_args(argv)
 
 def _skill_dir(name: str) -> str:
     """Build a virtual skill source routed through CompositeBackend."""
@@ -111,13 +136,15 @@ def _agent_skills(*sources: str) -> list[str]:
     return list(dict.fromkeys(ordered))
 
 
-def setup_local_resources() -> Path:
+def setup_local_resources(code_target_rel: str) -> Path:
     """Create read-only local resources exposed through CompositeBackend."""
     LOCAL_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
     policy_file = LOCAL_RESOURCES_DIR / "aperio_policy.yaml"
-    if not policy_file.exists():
-        policy_file.write_text(
-            """security:
+    sandbox_source_path = (
+        SANDBOX_PROJECT_ROOT if code_target_rel == "." else f"{SANDBOX_PROJECT_ROOT}/{code_target_rel}"
+    )
+    policy_file.write_text(
+        f"""security:
   sandbox: docker
   require_human_approval:
     - execute
@@ -140,7 +167,8 @@ output_contract:
     - /outputs/prd_review/review_matrix.md
 code_health:
   project_root: /workspace/project
-  source_path: /workspace/project/app/core
+  source_path: {sandbox_source_path}
+  target_relative_path: {code_target_rel}
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:
@@ -175,8 +203,8 @@ web_search:
   memory_policy: "do not store raw search results in /memories/; only curated reusable conclusions belong there"
 team: aperio-demo
 """,
-            encoding="utf-8",
-        )
+        encoding="utf-8",
+    )
     return LOCAL_RESOURCES_DIR
 
 
@@ -1285,6 +1313,13 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    args = parse_args()
+    code_project_path = _resolve_host_path(args.code_project)
+    code_target_rel = _normalize_relative_path(args.code_target)
+    code_target_path = (code_project_path if code_target_rel == "." else code_project_path / code_target_rel).resolve()
+    sandbox_code_target = (
+        SANDBOX_PROJECT_ROOT if code_target_rel == "." else f"{SANDBOX_PROJECT_ROOT}/{code_target_rel}"
+    )
     # ---- LangSmith ----
     # langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY", "")
     # langsmith_enabled = bool(langsmith_key)
@@ -1304,20 +1339,21 @@ def main():
     if not api_key:
         print("ERROR: DEEPSEEK_API_KEY not found")
         return
-    target_project_path = (_PROJECT_ROOT / TARGET_PROJECT).resolve()
-    target_path = (_PROJECT_ROOT / TARGET_CODE).resolve()
-    if not target_project_path.exists():
-        print(f"ERROR: target project '{TARGET_PROJECT}' not found")
+    if not code_project_path.exists():
+        print(f"ERROR: code project not found: {code_project_path}")
         return
-    if not target_path.exists():
-        print(f"ERROR: target code '{TARGET_CODE}' not found")
+    if not code_project_path.is_dir():
+        print(f"ERROR: code project must be a directory: {code_project_path}")
+        return
+    if not code_target_path.exists():
+        print(f"ERROR: code target not found: {code_target_path}")
         return
 
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     run_root = WORKSPACE_ROOT / run_id
     code_ws = "/outputs/code_health"
     prd_ws = "/outputs/prd_review"
-    local_resources = setup_local_resources()
+    local_resources = setup_local_resources(code_target_rel)
     (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
     (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
 
@@ -1325,7 +1361,7 @@ def main():
     store = InMemoryStore()
     sandbox: AgentDockerSandbox | None = None
     try:
-        sandbox = AgentDockerSandbox(target_project_path, SKILLS_DIR, run_root)
+        sandbox = AgentDockerSandbox(code_project_path, SKILLS_DIR, run_root)
     except Exception as exc:
         print(f"ERROR: Docker sandbox unavailable: {exc}")
         print("Run Docker Desktop, then rerun this demo in the llm-dev environment.")
@@ -1445,7 +1481,7 @@ def main():
 
 扫描后的工作流程：
 1. 可读取 /local-resources/aperio_policy.yaml 了解安全和存储策略。
-2. 必须使用 task 工具并行派发 4 个已声明子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
+2. 必须使用 task 工具并行派发 4 个已声明子代理分析 `{sandbox_code_target}`，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
@@ -1469,7 +1505,7 @@ def main():
 - 不要写入 /outputs/code_health_report.md；最终报告只能是 {code_ws}/code_health_report.md""",
         "subagents": _code_health_subagents(
             code_ws,
-            SANDBOX_TARGET_CODE,
+            sandbox_code_target,
             metrics,
             model,
             backend,
@@ -1568,7 +1604,8 @@ PRD 使用中文撰写。""",
     # ---- Run: Code Health ----
     print(f"\n{'─' * 60}")
     print("Task 1: Code Health Scan")
-    print(f"Target: {TARGET_CODE}")
+    print(f"Project: {code_project_path}")
+    print(f"Target:  {code_target_rel}")
     print(f"{'─' * 60}")
 
     t0 = time.time()
@@ -1578,7 +1615,9 @@ PRD 使用中文撰写。""",
             "messages": [{
                 "role": "user",
                 "content": (
-                    f"请对我的代码库 `{TARGET_CODE}` 进行完整的代码健康检查。"
+                    "请对挂载到沙盒 `/workspace/project` 的代码库进行完整的代码健康检查。"
+                    f"扫描目标相对项目根路径是 `{code_target_rel}`，"
+                    "原始工具结果必须写入 `/outputs/code_health/raw/tool_results.json`。"
                 ),
             }],
         },

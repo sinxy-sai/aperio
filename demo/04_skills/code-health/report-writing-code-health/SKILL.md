@@ -53,7 +53,7 @@ description: Use when merging code-health drafts into the final Aperio code heal
 ## 范围规则
 
 - `findings[].in_target=true` 的发现属于本次目标范围，应进入主要风险概览。
-- `findings[].in_target=false` 的发现属于项目上下文，只能进入“项目上下文发现”或“覆盖范围与限制”，不要混入 `app/core` 的目标风险数量。
+- `findings[].in_target=false` 的发现属于项目上下文，只能进入“项目上下文发现”或“覆盖范围与限制”，不要混入本次扫描目标的风险数量。
 - 报告必须明确展示 `findings_summary.target_total` 和 `findings_summary.project_context_total`。如果工具版本没有这些字段，则根据路径前缀人工区分。
 - 扫描目标是子目录时，健康度评分只代表该子目录；全项目依赖、测试、迁移脚本和疑似密钥扫描可以作为背景风险，但不得替代目标目录结论。
 

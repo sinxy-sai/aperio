@@ -21,7 +21,8 @@ output_contract:
     - /outputs/prd_review/review_matrix.md
 code_health:
   project_root: /workspace/project
-  source_path: /workspace/project/app/core
+  source_path: /workspace/project
+  target_relative_path: .
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:
