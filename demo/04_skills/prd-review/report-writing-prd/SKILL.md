@@ -1,5 +1,5 @@
 ---
-name: report-writing
+name: report-writing-prd
 description: Use when editing PRD review outputs into Aperio PRD v2 documents, especially when merging product, technical, UX, and risk feedback into final Chinese Markdown files.
 ---
 

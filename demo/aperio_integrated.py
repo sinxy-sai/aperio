@@ -8,14 +8,14 @@ Architecture:
     │     ├── security-analyst    (async, skill: code-security)
     │     ├── dependency-checker  (async, skill: code-dependency)
     │     ├── doc-reviewer        (async, skill: code-documentation)
-    │     └── summarizer          (sync,  skill: report-writing)
+    │     └── summarizer          (sync,  skill: report-writing-code-health)
     │
     └── prd-review-orchestrator   (sync)
           ├── product-strategist  (async, skill: review-ops)
           ├── technical-feasibility(async,skill: review-tech)
           ├── ux-researcher       (async, skill: review-ux)
           ├── risk-analyst        (async, skill: review-risk)
-          └── editor              (sync,  skill: report-writing + review-matrix)
+          └── editor              (sync,  skill: report-writing-prd + review-matrix)
 
 Usage:
   conda activate llm-dev
@@ -63,6 +63,7 @@ from deepagents.backends.store import StoreBackend
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -800,6 +801,63 @@ class PerfMiddleware(AgentMiddleware):
             raise
 
 
+class RouterToolGuardMiddleware(AgentMiddleware):
+    """Keep the main router as a pure delegator."""
+
+    allowed_tools = {"task"}
+    router_prompt = """You are Aperio's Main Router. Your only job is task classification and delegation.
+
+Routing rules:
+- For code analysis, code health checks, or quality scans, call task and delegate to code-health-orchestrator.
+- For PRD writing, PRD review, or product requirements documents, call task and delegate to prd-review-orchestrator.
+- If the user asks for both, call task separately for both orchestrators.
+- If the request is outside these two task families, briefly say this demo only supports code-health and prd-review.
+
+Hard constraints:
+- Use only the task tool for delegation. Do not use ls, glob, grep, read_file, execute, write_file, or internet_search.
+- Do not explore files, read source code, search the web, analyze code, write PRDs, or write reports.
+- After delegation, wait for the orchestrator result. Do not perform extra validation or file checks.
+- If other tools are visible, ignore them."""
+
+    @staticmethod
+    def _tool_name(tool) -> str:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict) and function.get("name"):
+                return str(function["name"])
+            if tool.get("name"):
+                return str(tool["name"])
+            return ""
+        return str(getattr(tool, "name", ""))
+
+    def wrap_model_call(self, request, handler):
+        # Root router should not see exploration tools. Orchestrators and leaf
+        # agents keep their normal tools because this middleware is root-only.
+        filtered_tools = [
+            tool
+            for tool in request.tools
+            if self._tool_name(tool) in self.allowed_tools
+        ]
+        return handler(request.override(
+            tools=filtered_tools,
+            system_message=SystemMessage(content=self.router_prompt),
+        ))
+
+    def wrap_tool_call(self, request, handler):
+        tool_name = request.tool_call.get("name", "")
+        if tool_name in self.allowed_tools:
+            return handler(request)
+        return ToolMessage(
+            content=(
+                "Main Router is a pure routing agent. Direct tool use is blocked here; "
+                "delegate to code-health-orchestrator or prd-review-orchestrator with the task tool."
+            ),
+            tool_call_id=request.tool_call["id"],
+            name=tool_name,
+            status="error",
+        )
+
+
 class ObservableSummarizationMiddleware(SummarizationMiddleware):
     """DeepAgents summarization with explicit debug and metrics events."""
 
@@ -954,7 +1012,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
             "description": "Merge 4 analysis reports into a consolidated code health report",
             "system_prompt": f"""{language_rule}
 
-你是报告汇总专家。按 report-writing skill 合并代码健康报告。
+你是报告汇总专家。按 report-writing-code-health skill 合并代码健康报告。
 输入：读取 {ws}/raw/tool_results.json，以及四个标准草稿 {ws}/drafts/architect.md、{ws}/drafts/security.md、{ws}/drafts/dependencies.md、{ws}/drafts/documentation.md。
 输出：只写入 Markdown 最终报告 {ws}/code_health_report.md。
 禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证；不要读取源码或做新的代码探索。
@@ -1015,7 +1073,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
         {
             "name": "editor",
             "description": "Merge all reviews into a final polished PRD v2 with review matrix",
-            "system_prompt": f"""你是 PRD 编辑。按 report-writing 和 review-matrix skills 合并 PRD 评审。
+            "system_prompt": f"""你是 PRD 编辑。按 report-writing-prd 和 review-matrix skills 合并 PRD 评审。
 输入：读取 {ws}/prd_v1.md，以及四个标准草稿 {ws}/drafts/review_strategy.md、{ws}/drafts/review_tech.md、{ws}/drafts/review_ux.md、{ws}/drafts/review_risk.md。
 输出：分别写入 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md。
 禁止：不要接受别名草稿，不要写 final_report.md、merged 文件或 /outputs/*.md；不要用 execute 读写 /outputs/ 或做写后验证。
@@ -1142,6 +1200,7 @@ def main():
             on_failure="error",
         ),
         ModelFallbackMiddleware(fallback_model),
+        RouterToolGuardMiddleware(),
         *root_observability,
         ToolRetryMiddleware(
             tools=["ls", "glob", "grep", "read_file", "internet_search"],

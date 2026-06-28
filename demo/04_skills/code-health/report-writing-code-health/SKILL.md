@@ -1,5 +1,5 @@
 ---
-name: report-writing
+name: report-writing-code-health
 description: Use when merging code-health drafts into the final Aperio code health report, especially when the report must combine ruff, mypy, bandit, pip-audit, pytest, coverage, deptry, interrogate, radon, detect-secrets, and human review evidence into a Chinese Markdown artifact.
 ---
 
