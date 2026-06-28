@@ -9,6 +9,7 @@ security:
     evidence_rule: "web snippets are supplemental; local files and tool results remain authoritative"
 storage:
   default: docker_sandbox
+  inputs: filesystem
   outputs: filesystem
   temp: state
   memories: store
@@ -16,13 +17,15 @@ storage:
 output_contract:
   root_markdown_aliases: denied
   final_outputs:
-    - /outputs/code_health/code_health_report.md
-    - /outputs/prd_review/prd_v2_final.md
-    - /outputs/prd_review/review_matrix.md
+    code_health:
+      - /outputs/code_health/code_health_report.md
+    prd_review:
+      - /outputs/prd_review/prd_v2_final.md
+      - /outputs/prd_review/review_matrix.md
 code_health:
   project_root: /workspace/project
-  source_path: /workspace/project/app/core
-  target_relative_path: app/core
+  source_path: /workspace/project
+  target_relative_path: .
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:

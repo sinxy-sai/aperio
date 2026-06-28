@@ -31,9 +31,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 import tarfile
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -65,6 +65,7 @@ from langgraph.store.memory import InMemoryStore
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_core.tools import StructuredTool
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
@@ -128,19 +129,6 @@ PROJECT_ROOT_MARKERS = (
 class ObservedTaskOutputs:
     code_health: bool
     prd_review: bool
-
-    @property
-    def any_observed(self) -> bool:
-        return self.code_health or self.prd_review
-
-    @property
-    def labels(self) -> set[str]:
-        labels: set[str] = set()
-        if self.code_health:
-            labels.add("code-health")
-        if self.prd_review:
-            labels.add("prd-review")
-        return labels
 
 
 @dataclass(frozen=True)
@@ -221,19 +209,6 @@ def infer_project_root(target_path: Path) -> Path:
         current = current.parent
 
 
-def resolve_code_health_input(task_text: str) -> tuple[Path, str, Path]:
-    """Resolve runtime task text into host project root, target rel path, and target path."""
-    for candidate in extract_path_candidates(task_text):
-        candidate_path = _resolve_host_path(candidate)
-        if not candidate_path.exists():
-            continue
-        project_root = infer_project_root(candidate_path)
-        return project_root, _relative_path(candidate_path, project_root), candidate_path
-
-    project_root = _PROJECT_ROOT.resolve()
-    return project_root, ".", project_root
-
-
 def resolve_optional_code_context(task_text: str) -> tuple[Path, str, Path, bool]:
     """Resolve an optional code context without deciding whether code-health should run."""
     for candidate in extract_path_candidates(task_text):
@@ -308,20 +283,61 @@ def write_input_bundle(run_root: Path, bundle: dict[str, object]) -> Path:
     return bundle_path
 
 
-def _skill_dir(name: str) -> str:
-    """Build a virtual skill source routed through CompositeBackend."""
-    return "/skills/" + name.replace("\\", "/").strip("/")
+def _domain_skill(domain: str, skill: str) -> str:
+    """Return a concrete skill ref relative to SKILLS_DIR."""
+    return f"{domain}/{skill}".replace("\\", "/").strip("/")
 
 
-def _shared_skill_dir() -> str:
-    """Return the shared-skill source under /skills/shared."""
-    return _skill_dir("shared")
+def _shared_skill(skill: str) -> str:
+    """Return a concrete shared skill ref relative to SKILLS_DIR."""
+    return f"shared/{skill}".replace("\\", "/").strip("/")
 
 
-def _agent_skills(*sources: str) -> list[str]:
-    """Attach shared skills plus agent-specific skill sources."""
-    ordered = [_shared_skill_dir(), *sources]
+def _agent_skill_refs(*role_refs: str, shared_refs: tuple[str, ...] = ()) -> list[str]:
+    """Attach only explicitly requested shared skill refs plus role-specific refs."""
+    ordered = [*shared_refs, *role_refs]
     return list(dict.fromkeys(ordered))
+
+
+def _safe_skill_source_name(agent_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_name.strip())
+    return safe.strip("-") or "agent"
+
+
+class AgentSkillSources:
+    """Build per-agent DeepAgents skill source directories.
+
+    DeepAgents expects each `skills` entry to be a source directory containing
+    skill subdirectories, not a single skill directory. This materializes a
+    small source per agent so subagents see only the skills explicitly assigned
+    to them while bundled scripts can still reference the original /skills tree.
+    """
+
+    virtual_root = "/agent-skills"
+
+    def __init__(self, run_root: Path) -> None:
+        self.host_root = run_root / "agent_skills"
+        self.host_root.mkdir(parents=True, exist_ok=True)
+
+    def source(self, agent_name: str, *role_refs: str, shared_refs: tuple[str, ...] = ()) -> list[str]:
+        refs = _agent_skill_refs(*role_refs, shared_refs=shared_refs)
+        if not refs:
+            return []
+
+        source_name = _safe_skill_source_name(agent_name)
+        source_root = self.host_root / source_name
+        if source_root.exists():
+            shutil.rmtree(source_root)
+        source_root.mkdir(parents=True, exist_ok=True)
+
+        for ref in refs:
+            src = (SKILLS_DIR / ref).resolve()
+            if not (src / "SKILL.md").exists():
+                raise FileNotFoundError(f"skill not found or missing SKILL.md: {src}")
+            dst = source_root / src.name
+            shutil.copytree(src, dst)
+
+        return [f"{self.virtual_root}/{source_name}"]
 
 
 def setup_local_resources(code_target_rel: str = ".") -> Path:
@@ -415,6 +431,7 @@ def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDo
     print(f"  default: DockerSandbox image={sandbox.image} container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
     print(f"  /inputs/ -> FilesystemBackend({run_root / 'inputs'}) [write denied]")
     print(f"  /outputs/ -> FilesystemBackend({run_root})")
+    print(f"  /agent-skills/ -> FilesystemBackend({run_root / 'agent_skills'})")
     print("  /memories/ -> StoreBackend(namespace=aperio)")
     print("  /temp/ -> StateBackend()")
     print(f"  /local-resources/ -> FilesystemBackend({local_resources}) [write denied]")
@@ -1006,7 +1023,24 @@ def _load_mcp_tools(run_root: Path) -> list:
         },
         handle_tool_errors=True,
     )
-    return asyncio.run(client.get_tools())
+    return [_sync_tool_for_invoke(tool) for tool in asyncio.run(client.get_tools())]
+
+
+def _sync_tool_for_invoke(tool):
+    """Wrap async MCP StructuredTools so the sync DeepAgents graph can invoke them."""
+    if not isinstance(tool, StructuredTool) or tool.func is not None:
+        return tool
+
+    def invoke_async_tool(**kwargs):
+        return asyncio.run(tool.ainvoke(kwargs))
+
+    return StructuredTool.from_function(
+        func=invoke_async_tool,
+        coroutine=tool.coroutine,
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1380,6 +1414,7 @@ def _code_health_subagents(
     model,
     backend,
     completed_final_paths: set[str],
+    skill_sources: AgentSkillSources,
 ) -> list:
     """Return the 5 sub-agents for code health orchestration."""
     language_rule = "全文使用中文；工具名、文件路径、命令、错误码可以保留英文原文。"
@@ -1404,7 +1439,10 @@ def _code_health_subagents(
 {evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/architect.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health")),
+            "skills": skill_sources.source(
+                "code-health-orchestrator.architect",
+                _domain_skill("code-health", "code-architect"),
+            ),
             "middleware": analysis_middleware("root.code-health-orchestrator.architect"),
         },
         {
@@ -1417,7 +1455,10 @@ def _code_health_subagents(
 {evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/security.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health")),
+            "skills": skill_sources.source(
+                "code-health-orchestrator.security-analyst",
+                _domain_skill("code-health", "code-security"),
+            ),
             "middleware": analysis_middleware("root.code-health-orchestrator.security-analyst"),
         },
         {
@@ -1431,7 +1472,10 @@ def _code_health_subagents(
 联网：不要调用 internet_search；本阶段只基于本地扫描事实和草稿证据。
 输出：只写入 Markdown 草稿 {ws}/drafts/dependencies.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health")),
+            "skills": skill_sources.source(
+                "code-health-orchestrator.dependency-checker",
+                _domain_skill("code-health", "code-dependency"),
+            ),
             "middleware": analysis_middleware("root.code-health-orchestrator.dependency-checker"),
         },
         {
@@ -1444,7 +1488,10 @@ def _code_health_subagents(
 {evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/documentation.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health")),
+            "skills": skill_sources.source(
+                "code-health-orchestrator.doc-reviewer",
+                _domain_skill("code-health", "code-documentation"),
+            ),
             "middleware": analysis_middleware("root.code-health-orchestrator.doc-reviewer"),
         },
         {
@@ -1457,7 +1504,10 @@ def _code_health_subagents(
 输出：只写入 Markdown 最终报告 {ws}/code_health_report.md。
 禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证；不要读取源码或做新的代码探索。
 完成写入后立即停止。""",
-            "skills": _agent_skills(_skill_dir("code-health")),
+            "skills": skill_sources.source(
+                "code-health-orchestrator.summarizer",
+                _domain_skill("code-health", "report-writing-code-health"),
+            ),
             "middleware": [
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health summarizer"),
                 FinalOutputGuardMiddleware(
@@ -1471,7 +1521,7 @@ def _code_health_subagents(
     ]
 
 
-def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
+def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sources: AgentSkillSources) -> list:
     """Return the 5 sub-agents for PRD review orchestration (writer is the orchestrator itself)."""
     return [
         {
@@ -1482,7 +1532,11 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：最多调用 1 次 internet_search，save_path={ws}/raw/web_search/product-strategy.json。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_strategy.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review")),
+            "skills": skill_sources.source(
+                "prd-review-orchestrator.product-strategist",
+                _domain_skill("prd-review", "review-ops"),
+                shared_refs=(_shared_skill("web-search"),),
+            ),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
         },
         {
@@ -1493,7 +1547,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_tech.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review")),
+            "skills": skill_sources.source(
+                "prd-review-orchestrator.technical-feasibility",
+                _domain_skill("prd-review", "review-tech"),
+            ),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
         },
         {
@@ -1504,7 +1561,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_ux.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review")),
+            "skills": skill_sources.source(
+                "prd-review-orchestrator.ux-researcher",
+                _domain_skill("prd-review", "review-ux"),
+            ),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
         },
         {
@@ -1515,7 +1575,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_risk.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review")),
+            "skills": skill_sources.source(
+                "prd-review-orchestrator.risk-analyst",
+                _domain_skill("prd-review", "review-risk"),
+            ),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
         },
         {
@@ -1526,13 +1589,17 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 输出：分别写入 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md。
 禁止：不要接受别名草稿，不要写 final_report.md、merged 文件或 /outputs/*.md；不要用 execute 读写 /outputs/ 或做写后验证。
 完成两个文件写入后立即停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review")),
+            "skills": skill_sources.source(
+                "prd-review-orchestrator.editor",
+                _domain_skill("prd-review", "report-writing-prd"),
+                _domain_skill("prd-review", "review-matrix"),
+            ),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
         },
     ]
 
 
-def _general_purpose_agent(metrics: Metrics, model, backend) -> dict:
+def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: AgentSkillSources) -> dict:
     return {
         "name": "general-purpose",
         "description": "Handle open-ended requests that do not match specialized code-health or PRD workflows",
@@ -1544,8 +1611,8 @@ def _general_purpose_agent(metrics: Metrics, model, backend) -> dict:
             route_when="Use when no specialized agent clearly matches, or the request is ordinary Q&A, explanation, brainstorming, translation, image/document discussion, or mixed open-ended assistance.",
             fallback=True,
         ),
-        "skills": _agent_skills(),
         "middleware": _agent_middleware(metrics, "root.general-purpose", model, backend),
+        "skills": skill_sources.source("general-purpose", shared_refs=(_shared_skill("web-search"),)),
         "system_prompt": """你是 Aperio 的通用智能体（general-purpose）。
 
 职责：
@@ -1619,6 +1686,7 @@ def main():
     input_bundle_path = write_input_bundle(run_root, input_bundle)
     (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
     (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
+    skill_sources = AgentSkillSources(run_root)
 
     # ---- Backend (M4 + M5) ----
     store = InMemoryStore()
@@ -1636,6 +1704,7 @@ def main():
         routes={
             "/inputs/": FilesystemBackend(root_dir=str(run_root / "inputs"), virtual_mode=True),
             "/outputs/": FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
+            "/agent-skills/": FilesystemBackend(root_dir=str(run_root / "agent_skills"), virtual_mode=True),
             "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
             "/temp/": StateBackend(),
             "/local-resources/": FilesystemBackend(root_dir=str(local_resources), virtual_mode=True),
@@ -1737,7 +1806,10 @@ def main():
             outputs=("/outputs/code_health/code_health_report.md",),
             route_when="User asks for code analysis, code health checks, code quality review, repository scan, static analysis, security/dependency/documentation/complexity checks.",
         ),
-        "skills": _agent_skills(_skill_dir("code-health")),
+        "skills": skill_sources.source(
+            "code-health-orchestrator",
+            _domain_skill("code-health", "code-health-toolkit"),
+        ),
         "middleware": [
             ToolAllowlistMiddleware({"execute", "read_file", "task", "write_todos"}, "code-health orchestrator"),
             FinalOutputGuardMiddleware(
@@ -1787,6 +1859,7 @@ def main():
             model,
             backend,
             code_health_final_paths,
+            skill_sources,
         ),
     }
     prd_review_orchestrator = {
@@ -1799,7 +1872,11 @@ def main():
             outputs=("/outputs/prd_review/prd_v2_final.md", "/outputs/prd_review/review_matrix.md"),
             route_when="User asks to write, refine, or review a PRD, product requirements document, feature requirements, or review matrix.",
         ),
-        "skills": _agent_skills(_skill_dir("prd-review")),
+        "skills": skill_sources.source(
+            "prd-review-orchestrator",
+            _domain_skill("prd-review", "prd-writing"),
+            shared_refs=(_shared_skill("web-search"),),
+        ),
         "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
@@ -1829,7 +1906,7 @@ def main():
 - PRD 联网搜索预算只有两个保存路径：{prd_ws}/raw/web_search/writer-research.json 和 {prd_ws}/raw/web_search/product-strategy.json，各最多 1 次
 
 PRD 使用中文撰写。""",
-        "subagents": _prd_review_subagents(prd_ws, metrics, model, backend),
+        "subagents": _prd_review_subagents(prd_ws, metrics, model, backend, skill_sources),
     }
     code_health_orchestrator["runnable"] = create_deep_agent(
         model=model,
@@ -1857,7 +1934,7 @@ PRD 使用中文撰写。""",
         subagents=prd_review_orchestrator["subagents"],
         name=prd_review_orchestrator["name"],
     )
-    general_purpose = _general_purpose_agent(metrics, model, backend)
+    general_purpose = _general_purpose_agent(metrics, model, backend, skill_sources)
     general_purpose["runnable"] = create_deep_agent(
         model=model,
         tools=custom_tools,
@@ -1892,7 +1969,7 @@ PRD 使用中文撰写。""",
         checkpointer=checkpointer,
         middleware=user_middleware,
         permissions=permissions,
-        skills=_agent_skills(),
+        skills=[],
         interrupt_on=root_interrupt_on,
         system_prompt=router_guard.router_prompt,
         subagents=subagent_specs,
