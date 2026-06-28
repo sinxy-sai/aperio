@@ -1521,7 +1521,14 @@ def _code_health_subagents(
     ]
 
 
-def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sources: AgentSkillSources) -> list:
+def _prd_review_subagents(
+    ws: str,
+    metrics: Metrics,
+    model,
+    backend,
+    skill_sources: AgentSkillSources,
+    completed_final_paths: set[str],
+) -> list:
     """Return the 5 sub-agents for PRD review orchestration (writer is the orchestrator itself)."""
     return [
         {
@@ -1537,7 +1544,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sourc
                 _domain_skill("prd-review", "review-ops"),
                 shared_refs=(_shared_skill("web-search"),),
             ),
-            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file", "internet_search"}, "PRD product strategist"),
+                *_agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
+            ],
         },
         {
             "name": "technical-feasibility",
@@ -1551,7 +1561,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sourc
                 "prd-review-orchestrator.technical-feasibility",
                 _domain_skill("prd-review", "review-tech"),
             ),
-            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD technical feasibility reviewer"),
+                *_agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
+            ],
         },
         {
             "name": "ux-researcher",
@@ -1565,7 +1578,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sourc
                 "prd-review-orchestrator.ux-researcher",
                 _domain_skill("prd-review", "review-ux"),
             ),
-            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD UX reviewer"),
+                *_agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
+            ],
         },
         {
             "name": "risk-analyst",
@@ -1579,7 +1595,10 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sourc
                 "prd-review-orchestrator.risk-analyst",
                 _domain_skill("prd-review", "review-risk"),
             ),
-            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD risk reviewer"),
+                *_agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
+            ],
         },
         {
             "name": "editor",
@@ -1594,7 +1613,15 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend, skill_sourc
                 _domain_skill("prd-review", "report-writing-prd"),
                 _domain_skill("prd-review", "review-matrix"),
             ),
-            "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD editor"),
+                FinalOutputGuardMiddleware(
+                    {f"{ws}/prd_v2_final.md", f"{ws}/review_matrix.md"},
+                    "PRD editor",
+                    completed_final_paths,
+                ),
+                *_agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
+            ],
         },
     ]
 
@@ -1795,6 +1822,7 @@ def main():
         },
     }
     code_health_final_paths: set[str] = set()
+    prd_review_final_paths: set[str] = set()
 
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
@@ -1877,7 +1905,18 @@ def main():
             _domain_skill("prd-review", "prd-writing"),
             shared_refs=(_shared_skill("web-search"),),
         ),
-        "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
+        "middleware": [
+            ToolAllowlistMiddleware(
+                {"read_file", "write_file", "internet_search", "task", "write_todos", "execute"},
+                "PRD review orchestrator",
+            ),
+            FinalOutputGuardMiddleware(
+                {f"{prd_ws}/prd_v2_final.md", f"{prd_ws}/review_matrix.md"},
+                "PRD review orchestrator",
+                prd_review_final_paths,
+            ),
+            *_agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
+        ],
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
 0. 用户运行时输入是唯一需求来源；不要假设任何固定测试用例、固定产品名、固定目标用户或固定场景。
@@ -1898,15 +1937,23 @@ def main():
 6. 等待全部 4 个完成后，派发 editor 合并生成 PRD v2 + 评审矩阵
 7. editor 的最终产物必须拆分为 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md
 8. 上述两个文件写入后流程即完成，不要再创建根目录 /outputs/*.md、别名文件、merged 文件或 {prd_ws}/final_report.md
-9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
+9. 不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件；editor 写入 {prd_ws}/prd_v2_final.md 和 {prd_ws}/review_matrix.md 后立即停止，不要 read_file、ls、glob、execute 或 write_todos
 
 硬约束：
 - PRD 主题、产品名称、目标用户、核心场景、范围边界和交付要求都必须来自用户运行时输入；如果用户没有提供，标为“待确认”，不要用 demo 示例补全
 - PRD 评审草稿只能是上述四个文件名；不要创建 review-product-completeness.md、review-technical-feasibility.md、review-ux.md、review-risk.md 或任何角色名别名文件
 - PRD 联网搜索预算只有两个保存路径：{prd_ws}/raw/web_search/writer-research.json 和 {prd_ws}/raw/web_search/product-strategy.json，各最多 1 次
+- 不要在最终产物写入后做根目录检查、文件大小检查、重复读取或输出验证；本程序会在外层打印产物清单
 
 PRD 使用中文撰写。""",
-        "subagents": _prd_review_subagents(prd_ws, metrics, model, backend, skill_sources),
+        "subagents": _prd_review_subagents(
+            prd_ws,
+            metrics,
+            model,
+            backend,
+            skill_sources,
+            prd_review_final_paths,
+        ),
     }
     code_health_orchestrator["runnable"] = create_deep_agent(
         model=model,
