@@ -21,8 +21,8 @@ output_contract:
     - /outputs/prd_review/review_matrix.md
 code_health:
   project_root: /workspace/project
-  source_path: /workspace/project
-  target_relative_path: .
+  source_path: /workspace/project/app/core
+  target_relative_path: app/core
   draft_dir: /outputs/code_health/drafts
   final_report: /outputs/code_health/code_health_report.md
   toolchain:
@@ -42,8 +42,6 @@ code_health:
     install_project_deps_default: false
     mypy_default_mode: lightweight_ignore_missing_imports
     mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
-    dependency_required_tools: [pip_audit, pytest, coverage]
-    dependency_required_tools_policy: "skip when APERIO_INSTALL_PROJECT_DEPS=0 to avoid slow or misleading results"
     pytest_coverage_limitation: "pytest and coverage depend on discovered tests and installed project dependencies"
     deptry_limitation: "without installed project dependencies, transitive dependency analysis can be incomplete"
     raw_results: /outputs/code_health/raw/tool_results.json

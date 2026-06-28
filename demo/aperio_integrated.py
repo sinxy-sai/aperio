@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import base64
 import atexit
-import argparse
 import asyncio
 import io
 import json
@@ -106,19 +105,104 @@ def _normalize_relative_path(path: str) -> str:
     return "." if normalized in {"", "."} else normalized
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Aperio integrated demo.")
-    parser.add_argument(
-        "--code-project",
-        default=os.environ.get("APERIO_CODE_PROJECT", "."),
-        help="Host-side project root to mount into the sandbox. Defaults to APERIO_CODE_PROJECT or current repo root.",
+def _relative_path(path: Path, root: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+        return _normalize_relative_path(str(rel).replace("\\", "/"))
+    except ValueError:
+        return "."
+
+
+PROJECT_ROOT_MARKERS = (
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "poetry.lock",
+    "uv.lock",
+    "package.json",
+    ".git",
+)
+
+
+def read_runtime_task() -> str:
+    """Read the user task at runtime; empty input means the current workspace."""
+    print("\n请输入任务，例如：对 path/to/project/src 做完整的代码健康检查")
+    try:
+        task = input("> ").strip()
+    except EOFError:
+        task = ""
+    return task or "请对当前工作区做完整的代码健康检查。"
+
+
+def _clean_path_candidate(text: str) -> str:
+    candidate = text.strip().strip("`'\"“”‘’「」『』（）()[]【】")
+    prefixes = (
+        "我的代码库",
+        "这个代码库",
+        "代码库",
+        "项目",
+        "目录",
+        "路径",
+        "当前",
     )
-    parser.add_argument(
-        "--code-target",
-        default=os.environ.get("APERIO_CODE_TARGET", "."),
-        help="Code-health scan target relative to --code-project. Defaults to APERIO_CODE_TARGET or the whole mounted project.",
-    )
-    return parser.parse_args(argv)
+    for prefix in prefixes:
+        if candidate.startswith(prefix):
+            candidate = candidate[len(prefix):].strip(" ：:，,")
+    candidate = re.split(
+        r"(?:做|进行|执行|开展|生成|输出|写入|完整|全面|代码健康|代码体检|代码检查|检查|体检|分析)",
+        candidate,
+        maxsplit=1,
+    )[0].strip(" ：:，,。.;；")
+    return candidate
+
+
+def extract_path_candidates(task_text: str) -> list[str]:
+    """Extract likely filesystem paths from a runtime natural-language task."""
+    candidates: list[str] = []
+    for match in re.finditer(r"[`'\"“「『](.+?)[`'\"”」』]", task_text):
+        candidates.append(_clean_path_candidate(match.group(1)))
+
+    for pattern in (
+        r"(?:对|给|扫描|检查|分析|体检)\s*(.+?)(?:做|进行|执行|开展|生成|输出|写入|$)",
+        r"(?:代码库|项目|目录|路径)\s*[:：]?\s*(.+?)(?:\s|，|。|；|;|$)",
+    ):
+        for match in re.finditer(pattern, task_text):
+            candidates.append(_clean_path_candidate(match.group(1)))
+
+    for token in re.split(r"\s+", task_text):
+        cleaned = _clean_path_candidate(token)
+        if "/" in cleaned or "\\" in cleaned or re.match(r"^[A-Za-z]:", cleaned):
+            candidates.append(cleaned)
+
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+    return ordered
+
+
+def infer_project_root(target_path: Path) -> Path:
+    """Find the closest project root for a target path using common manifests."""
+    current = target_path if target_path.is_dir() else target_path.parent
+    while True:
+        if any((current / marker).exists() for marker in PROJECT_ROOT_MARKERS):
+            return current
+        if current.parent == current:
+            return target_path if target_path.is_dir() else target_path.parent
+        current = current.parent
+
+
+def resolve_code_health_input(task_text: str) -> tuple[Path, str, Path]:
+    """Resolve runtime task text into host project root, target rel path, and target path."""
+    for candidate in extract_path_candidates(task_text):
+        candidate_path = _resolve_host_path(candidate)
+        if not candidate_path.exists():
+            continue
+        project_root = infer_project_root(candidate_path)
+        return project_root, _relative_path(candidate_path, project_root), candidate_path
+
+    project_root = _PROJECT_ROOT.resolve()
+    return project_root, ".", project_root
 
 def _skill_dir(name: str) -> str:
     """Build a virtual skill source routed through CompositeBackend."""
@@ -1313,9 +1397,8 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    args = parse_args()
-    code_project_path = _resolve_host_path(args.code_project)
-    code_target_rel = _normalize_relative_path(args.code_target)
+    runtime_task = read_runtime_task()
+    code_project_path, code_target_rel, code_target_path = resolve_code_health_input(runtime_task)
     code_target_path = (code_project_path if code_target_rel == "." else code_project_path / code_target_rel).resolve()
     sandbox_code_target = (
         SANDBOX_PROJECT_ROOT if code_target_rel == "." else f"{SANDBOX_PROJECT_ROOT}/{code_target_rel}"
@@ -1606,6 +1689,7 @@ PRD 使用中文撰写。""",
     print("Task 1: Code Health Scan")
     print(f"Project: {code_project_path}")
     print(f"Target:  {code_target_rel}")
+    print(f"User:    {runtime_task}")
     print(f"{'─' * 60}")
 
     t0 = time.time()
@@ -1615,8 +1699,10 @@ PRD 使用中文撰写。""",
             "messages": [{
                 "role": "user",
                 "content": (
-                    "请对挂载到沙盒 `/workspace/project` 的代码库进行完整的代码健康检查。"
-                    f"扫描目标相对项目根路径是 `{code_target_rel}`，"
+                    f"{runtime_task}\n\n"
+                    "运行时解析信息："
+                    "代码项目已挂载到沙盒 `/workspace/project`；"
+                    f"扫描目标相对项目根路径是 `{code_target_rel}`；"
                     "原始工具结果必须写入 `/outputs/code_health/raw/tool_results.json`。"
                 ),
             }],
