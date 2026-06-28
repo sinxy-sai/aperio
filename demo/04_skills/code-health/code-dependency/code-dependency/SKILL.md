@@ -33,6 +33,14 @@ triggers:
 - 没有 pip-audit、官方公告或明确网页证据时，不要写具体 CVE 编号。
 - internet_search 的摘要只能作为公开资料线索，不等同于已验证漏洞扫描结果。
 
+## 输出契约
+
+- 草稿必须全文使用中文。
+- 唯一草稿输出路径是 `/outputs/code_health/drafts/dependencies.md`。
+- 不要创建 `dependency-analysis.md`、`dependency-checker.md`、`dependencies.json`、HTML 或任何别名文件。
+- 如果调用 `internet_search`，`save_path` 必须是 `/outputs/code_health/raw/web_search/dependency-advisories.json`，且最多 1 次。
+- 写入标准草稿后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
+
 ## 检查清单
 
 - [ ] 主版本落后的包（>1 major version behind）

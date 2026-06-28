@@ -1086,21 +1086,17 @@ def _install_observable_summarization_profile(*model_specs: str) -> None:
 
 def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backend) -> list:
     """Return the 5 sub-agents for code health orchestration."""
-    language_rule = "输出语言硬性要求：全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文。"
+    language_rule = "全文使用中文；工具名、文件路径、命令、错误码可以保留英文原文。"
     return [
         {
             "name": "architect",
             "description": "Analyze code architecture: directory structure, module coupling, layering",
             "system_prompt": f"""{language_rule}
 
-你是代码架构师。分析 `{target}` 的架构：
-- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.python_files、tools.ruff、tools.mypy、tools.deptry 的事实
-- 如果 coverage_notes.mypy_mode=lightweight_ignore_missing_imports，必须说明 mypy 是轻量模式，结论不能等同完整 CI 类型检查
-- 目录结构是否合理、模块粒度是否合适
-- 是否存在明显 import 问题、循环依赖风险、God Class
-- 分层是否清晰（API → 业务 → 数据）
-- 必须按 code-architect skill 的 `references/code-smells.md` 复核代码坏味道；只报告有工具事实或源码证据支撑的异味，并区分指标型证据和人工判断
-将分析结果以 Markdown 写入 {ws}/drafts/architect.md，不要写 JSON/HTML，最后输出中文摘要。""",
+你是代码架构师。按 code-architect skill 分析 `{target}`。
+输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
+输出：只写入 Markdown 草稿 {ws}/drafts/architect.md，不要写 JSON/HTML 或别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health/code-architect")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.architect", model, backend),
         },
@@ -1109,12 +1105,10 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
             "description": "Audit code for vulnerabilities: SQL injection, XSS, hardcoded secrets, OWASP Top-10",
             "system_prompt": f"""{language_rule}
 
-你是应用安全工程师。审计 `{target}` 的安全：
-- 先读取 {ws}/raw/tool_results.json，优先引用 tools.bandit 和 tools.pip_audit 的事实
-- SQL 注入、XSS、硬编码密钥
-- 不安全反序列化、路径遍历
-- 敏感端点认证缺失
-将分析结果以 Markdown 写入 {ws}/drafts/security.md，不要写 JSON/HTML，最后输出中文摘要。""",
+你是应用安全工程师。按 code-security skill 审计 `{target}`。
+输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
+输出：只写入 Markdown 草稿 {ws}/drafts/security.md，不要写 JSON/HTML 或别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health/code-security")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.security-analyst", model, backend),
         },
@@ -1123,14 +1117,11 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
             "description": "Check dependencies: outdated versions, CVEs, license compatibility",
             "system_prompt": f"""{language_rule}
 
-你是依赖管理专家。检查 `{target}` 的依赖：
-- 先读取 {ws}/raw/tool_results.json，优先引用 discovery.dependency_files、setup.dependency_install、tools.pip_audit、tools.deptry 的事实
-- 如果 setup.dependency_install.skipped=true，必须说明项目依赖未安装，mypy 类型检查和依赖审计覆盖可能受限
-- 使用 tools.deptry 判断未使用依赖、缺失依赖、传递依赖使用问题；如果 deptry 不可用或报错，必须说明未覆盖
-- 默认不要联网逐包查询版本；只有 pip-audit 结果不足且确实需要公开公告补充时，最多调用 1 次 internet_search 做聚合查询，并将证据保存到 {ws}/raw/web_search/dependency-advisories.json；不能把搜索摘要当作已验证 CVE，具体漏洞仍以 pip-audit 或明确官方公告为准
-- 主版本落后的包、已知 CVE
-- 许可证兼容性、未声明的传递依赖
-将分析结果以 Markdown 写入 {ws}/drafts/dependencies.md，不要写 JSON/HTML，最后输出中文摘要。""",
+你是依赖管理专家。按 code-dependency skill 检查 `{target}`。
+输入：先读取 {ws}/raw/tool_results.json，必要时读取依赖清单。
+联网：默认不要联网；只有 skill 允许且确有必要时最多调用 1 次 internet_search，save_path={ws}/raw/web_search/dependency-advisories.json。
+输出：只写入 Markdown 草稿 {ws}/drafts/dependencies.md，不要写 JSON/HTML 或别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.dependency-checker", model, backend),
         },
@@ -1139,12 +1130,10 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
             "description": "Review documentation: README, docstrings, API docs coverage",
             "system_prompt": f"""{language_rule}
 
-你是技术文档专家。评估 `{target}` 的文档：
-- 先读取 {ws}/raw/tool_results.json，使用 discovery.python_files 和 tools.interrogate 明确实际扫描范围与 docstring 覆盖
-- 文档/docstring 覆盖优先引用 tools.interrogate；必要时再通过 read_file 阅读关键代码补充判断
-- README 完整性、公开 API docstring 覆盖率
-- 注释质量、配置说明
-将分析结果以 Markdown 写入 {ws}/drafts/documentation.md，不要写 JSON/HTML，最后输出中文摘要。""",
+你是技术文档专家。按 code-documentation skill 评估 `{target}`。
+输入：先读取 {ws}/raw/tool_results.json，必要时读取 README 和目标源码。
+输出：只写入 Markdown 草稿 {ws}/drafts/documentation.md，不要写 JSON/HTML 或别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.doc-reviewer", model, backend),
         },
@@ -1153,23 +1142,11 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
             "description": "Merge 4 analysis reports into a consolidated code health report",
             "system_prompt": f"""{language_rule}
 
-你是报告汇总专家。任务：
-1. read_file 读取 {ws}/raw/tool_results.json
-2. ls {ws}/drafts/ 发现所有分析报告
-3. read_file 逐个读取
-4. 去重合并 → 按严重度分级（Critical/High/Medium/Low）
-5. 按 skill 中的评分建议计算健康度评分（0-100），并说明工具覆盖情况、pytest/coverage 覆盖、mypy 轻量模式限制和置信度
-6. 必须调用 write_file 工具，将最终报告以 Markdown 写入这个唯一最终路径：{ws}/code_health_report.md
-
-报告使用中文 Markdown，包含执行摘要和趋势对比（如有历史数据）。
-最终输出契约：
-- 最终报告只能写入 {ws}/code_health_report.md
-- 最终报告必须是 Markdown，不要生成 HTML、JSON、CSS、JS 或可视化网页
-- 不要写入 /outputs/code_health_report.md、/outputs/core_code_health_report.md 或其他根级别文件名
-- 不要写入 {ws}/drafts/merged-report.md 作为最终报告；drafts 目录只保存中间草稿
-- 调用 write_file 成功写入 {ws}/code_health_report.md 后立即结束任务
-- 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
-- /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
+你是报告汇总专家。按 report-writing skill 合并代码健康报告。
+输入：读取 {ws}/raw/tool_results.json，以及四个标准草稿 {ws}/drafts/architect.md、{ws}/drafts/security.md、{ws}/drafts/dependencies.md、{ws}/drafts/documentation.md。
+输出：只写入 Markdown 最终报告 {ws}/code_health_report.md。
+禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证。
+完成写入后立即停止。""",
             "skills": _agent_skills(_skill_dir("code-health/report-writing")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
         },
@@ -1182,70 +1159,55 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
         {
             "name": "product-strategist",
             "description": "Review PRD from strategy perspective: market, business value, differentiation",
-            "system_prompt": f"""你是产品策略分析师。评审 PRD：
-- 市场定位是否清晰、是否有明确竞品
-- 商业价值和差异化在哪里
-- MVP 功能优先级是否合理
-- 必须最多调用 1 次 internet_search 补充公开竞品、市场和行业实践证据；save_path 只能是 {ws}/raw/web_search/product-strategy.json
-- 引用联网证据时必须保留链接，并说明这是公开资料补充，不是用户需求本身
-读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_strategy.md；不要写 review-product-completeness.md、product-strategist.md 或任何别名文件。输出中文摘要。""",
+            "system_prompt": f"""你是产品策略分析师。按 review-ops skill 评审 PRD。
+输入：读取 {ws}/prd_v1.md。
+联网：最多调用 1 次 internet_search，save_path={ws}/raw/web_search/product-strategy.json。
+输出：只写入 Markdown 草稿 {ws}/drafts/review_strategy.md，不要写别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
         },
         {
             "name": "technical-feasibility",
             "description": "Review PRD from tech perspective: stack, architecture, integration risks",
-            "system_prompt": f"""你是技术架构师。评审 PRD：
-- 技术栈是否可行、是否需要大规模重构
-- API 设计是否清晰、性能预期是否合理
-- 是否有安全隐患
-- 不要调用 internet_search；技术可行性评审只基于 PRD 初稿和工程常识
-读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_tech.md；不要写 review-technical-feasibility.md、technical-feasibility.md 或任何别名文件。输出中文摘要。""",
+            "system_prompt": f"""你是技术架构师。按 review-tech skill 评审 PRD。
+输入：读取 {ws}/prd_v1.md。
+联网：不要调用 internet_search。
+输出：只写入 Markdown 草稿 {ws}/drafts/review_tech.md，不要写别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
         },
         {
             "name": "ux-researcher",
             "description": "Review PRD from UX perspective: user journey, edge cases, accessibility",
-            "system_prompt": f"""你是 UX 研究员。评审 PRD：
-- 用户操作路径是否最短、异常状态是否覆盖
-- 交互一致性、无障碍、信息架构
-- 不要调用 internet_search；UX 评审只基于 PRD 初稿和可用性原则
-读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_ux.md；不要写 review-ux.md、ux-researcher.md 或任何别名文件。输出中文摘要。""",
+            "system_prompt": f"""你是 UX 研究员。按 review-ux skill 评审 PRD。
+输入：读取 {ws}/prd_v1.md。
+联网：不要调用 internet_search。
+输出：只写入 Markdown 草稿 {ws}/drafts/review_ux.md，不要写别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
         },
         {
             "name": "risk-analyst",
             "description": "Review PRD from risk perspective: timeline, resources, privacy, adoption barriers",
-            "system_prompt": f"""你是项目风险分析师。评审 PRD：
-- 时间线和资源风险、团队能力匹配
-- 数据隐私合规、用户采纳障碍
-- 不要调用 internet_search；风险评估只基于 PRD 初稿和项目管理/合规常识
-读取 {ws}/prd_v1.md，将评审写入唯一草稿文件 {ws}/drafts/review_risk.md；不要写 risk-analyst.md、review-risk.md 或任何别名文件。输出中文摘要。""",
+            "system_prompt": f"""你是项目风险分析师。按 review-risk skill 评审 PRD。
+输入：读取 {ws}/prd_v1.md。
+联网：不要调用 internet_search。
+输出：只写入 Markdown 草稿 {ws}/drafts/review_risk.md，不要写别名文件。
+完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("prd-review/review-risk")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
         },
         {
             "name": "editor",
             "description": "Merge all reviews into a final polished PRD v2 with review matrix",
-            "system_prompt": f"""你是 PRD 编辑。任务：
-1. 读取 {ws}/prd_v1.md
-2. 只读取这四个标准评审草稿：{ws}/drafts/review_strategy.md、{ws}/drafts/review_tech.md、{ws}/drafts/review_ux.md、{ws}/drafts/review_risk.md；不要接受别名文件作为替代
-3. 综合反馈，生成修订版 PRD v2 → {ws}/prd_v2_final.md
-4. 生成评审矩阵 → {ws}/review_matrix.md
-   （格式：序号 | 维度 | 严重度 | 问题 | 建议 | 状态）
-5. 必须调用 write_file 工具分别写入上述两个文件
-
-报告使用中文。
-最终输出契约：
-- PRD v2 只能写入 {ws}/prd_v2_final.md
-- 评审矩阵只能写入 {ws}/review_matrix.md
-- 完成上述两个标准文件后立即停止，不要再创建副本、别名、merged 文件或根目录 /outputs/*.md 文件
-- 不要写入 {ws}/final_report.md 作为最终报告；必须拆分为上述两个标准文件
-- 调用 write_file 成功写入上述两个标准文件后立即结束任务
-- 不要再使用 execute 运行 ls、wc、cat、cp、touch 等命令验证、复制、重写或另存输出文件
-- /outputs/ 路径只通过文件工具访问，不要在 execute 命令中读写 /outputs/。""",
+            "system_prompt": f"""你是 PRD 编辑。按 report-writing 和 review-matrix skills 合并 PRD 评审。
+输入：读取 {ws}/prd_v1.md，以及四个标准草稿 {ws}/drafts/review_strategy.md、{ws}/drafts/review_tech.md、{ws}/drafts/review_ux.md、{ws}/drafts/review_risk.md。
+输出：分别写入 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md。
+禁止：不要接受别名草稿，不要写 final_report.md、merged 文件或 /outputs/*.md；不要用 execute 读写 /outputs/ 或做写后验证。
+完成两个文件写入后立即停止。""",
             "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
         },

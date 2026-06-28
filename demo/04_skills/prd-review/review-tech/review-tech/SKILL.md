@@ -29,6 +29,7 @@ triggers:
 - 唯一草稿输出路径是 `/outputs/prd_review/drafts/review_tech.md`。
 - 不要创建 `review-technical-feasibility.md`、`technical-feasibility.md`、`review-tech.md` 或任何别名文件。
 - 草稿必须全文使用中文。
+- 写入标准草稿后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
 
 ## 输出格式
 

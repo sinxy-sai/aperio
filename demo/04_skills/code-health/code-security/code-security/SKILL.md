@@ -29,6 +29,13 @@ triggers:
 - `detect-secrets` 的发现是“疑似密钥”，必须结合文件路径和上下文判断误报；不要直接写成已泄露密钥。
 - 每个 High 以上问题必须包含文件:行号、影响、攻击/滥用场景、修复方案。
 
+## 输出契约
+
+- 草稿必须全文使用中文。
+- 唯一草稿输出路径是 `/outputs/code_health/drafts/security.md`。
+- 不要创建 `security-analysis.md`、`security_report.md`、JSON/HTML 或任何别名文件。
+- 写入标准草稿后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
+
 ## 检查清单
 
 - [ ] SQL 注入（字符串拼接构建查询）

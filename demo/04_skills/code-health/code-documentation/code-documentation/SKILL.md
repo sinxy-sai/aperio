@@ -29,6 +29,13 @@ triggers:
 - docstring 覆盖率可以引用 `tools.interrogate` 的自动统计；人工阅读只能作为抽样补充，不能和工具统计混为一谈。
 - 如果 README 不在扫描目录内，必须说明未覆盖，不要假设不存在。
 
+## 输出契约
+
+- 草稿必须全文使用中文。
+- 唯一草稿输出路径是 `/outputs/code_health/drafts/documentation.md`。
+- 不要创建 `documentation-analysis.md`、`doc-reviewer.md`、JSON/HTML 或任何别名文件。
+- 写入标准草稿后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
+
 ## 检查清单
 
 - [ ] README 包含：项目简介、环境要求、安装步骤、使用示例

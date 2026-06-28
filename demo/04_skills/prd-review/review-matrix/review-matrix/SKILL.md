@@ -19,6 +19,7 @@ triggers:
 - 文件必须写入指定的 `review_matrix.md`。
 - 不要把矩阵写入 `prd_v2_final.md` 后就结束；它必须是独立文件。
 - 不要创建 `final_report.md`、`merged` 文件或根目录 `/outputs/*.md`。
+- 标准矩阵写入成功后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
 
 ## 输入契约
 

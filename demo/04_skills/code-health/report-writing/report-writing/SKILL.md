@@ -19,6 +19,18 @@ triggers:
 - 工具名、命令、文件路径、包名、错误码可以保留英文原文。
 - 最终报告必须是 Markdown，只能写入 `code_health_report.md`。
 - 不要生成 HTML、CSS、JavaScript、JSON 或可视化网页作为最终报告。
+- 标准报告写入成功后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
+
+## 输入契约
+
+- 必须读取 `/outputs/code_health/raw/tool_results.json`。
+- 只能把这四个草稿作为有效输入：
+  - `/outputs/code_health/drafts/architect.md`
+  - `/outputs/code_health/drafts/security.md`
+  - `/outputs/code_health/drafts/dependencies.md`
+  - `/outputs/code_health/drafts/documentation.md`
+- 不要接受 `architect-analysis.md`、`security-analysis.md`、`dependency-analysis.md`、`documentation-analysis.md`、`merged-report.md` 或角色名文件作为替代输入。
+- 如果任意标准草稿缺失，应在报告中说明缺失并降低置信度，不要用别名文件静默替代。
 
 ## 证据规则
 

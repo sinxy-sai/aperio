@@ -32,6 +32,13 @@ triggers:
 - 如果扫描范围只是子目录，必须说明结论只适用于该范围。
 - 代码坏味道分为两类：`radon`/行数/依赖工具可证明的指标型异味，以及需要人工判断的设计型异味；报告中必须标注证据类型。
 
+## 输出契约
+
+- 草稿必须全文使用中文。
+- 唯一草稿输出路径是 `/outputs/code_health/drafts/architect.md`。
+- 不要创建 `architect-analysis.md`、`architecture.md`、`code_architect.md`、JSON/HTML 或任何别名文件。
+- 写入标准草稿后立即结束，不要再用 `execute` 验证、复制、重写或另存 `/outputs/` 中的文件。
+
 ## 检查清单
 
 - [ ] 目录结构逻辑清晰、导航直观
