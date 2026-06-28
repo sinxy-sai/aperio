@@ -580,11 +580,13 @@ def print_subagent_debug(subagents: list[dict], backend: CompositeBackend) -> No
                 print(f"      loaded {skill['name']} -> {skill['path']}")
 
 
-def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
-    custom_tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in custom_tools]
+def print_tool_debug(subagents: list[dict], shared_tools: list, general_purpose_tools: list) -> None:
+    shared_tool_names = _tool_names(shared_tools)
+    general_tool_names = _tool_names(general_purpose_tools)
     print("\n[debug] Tools")
     print("  built-in: write_todos, task, ls, read_file, write_file, edit_file, glob, grep, execute")
-    print(f"  custom: {custom_tool_names or '[]'}")
+    print(f"  shared custom: {shared_tool_names or '[]'}")
+    print(f"  general-purpose custom: {general_tool_names or '[]'}")
     print("  inheritance: declared subagents without a tools field inherit the main agent tool set.")
     for name, spec in _collect_subagents(subagents):
         if "runnable" in spec:
@@ -595,7 +597,7 @@ def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
             tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in spec["tools"]]
             print(f"  - {name}: tools={tool_names} [override]")
         else:
-            print(f"  - {name}: tools=inherited + custom={custom_tool_names or '[]'}")
+            print(f"  - {name}: tools=inherited + shared custom={shared_tool_names or '[]'}")
 
 
 def print_subagent_middleware_debug(subagents: list[dict]) -> None:
@@ -1753,7 +1755,58 @@ def _prd_review_subagents(
     ]
 
 
-def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: AgentSkillSources) -> dict:
+def _tool_names(tools: list) -> list[str]:
+    return [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in tools]
+
+
+def _message_content_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts).strip()
+    return str(content).strip() if content is not None else ""
+
+
+def extract_final_answer(response) -> str:
+    value = response.value if hasattr(response, "value") else response
+    if isinstance(value, dict):
+        messages = value.get("messages", [])
+    else:
+        messages = getattr(value, "messages", None)
+        if messages is None:
+            result = getattr(value, "result", None)
+            messages = result.get("messages", []) if isinstance(result, dict) else []
+    for message in reversed(messages or []):
+        msg_type = getattr(message, "type", None) or getattr(message, "role", None)
+        if msg_type in {"ai", "assistant"} or message.__class__.__name__.lower().startswith("ai"):
+            text = _message_content_text(getattr(message, "content", None))
+            if text:
+                return text
+    for message in reversed(messages or []):
+        msg_type = getattr(message, "type", None) or getattr(message, "role", None)
+        msg_name = getattr(message, "name", None)
+        if msg_type == "tool" and (msg_name in {None, "task"}):
+            text = _message_content_text(getattr(message, "content", None))
+            if text:
+                return text
+    return ""
+
+
+def _general_purpose_agent(
+    metrics: Metrics,
+    model,
+    backend,
+    skill_sources: AgentSkillSources,
+    custom_tool_names: set[str],
+) -> dict:
     return {
         "name": "general-purpose",
         "description": "Handle open-ended requests that do not match specialized code-health or PRD workflows",
@@ -1765,7 +1818,10 @@ def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: Agen
             route_when="Use when no specialized agent clearly matches, or the request is ordinary Q&A, explanation, brainstorming, translation, image/document discussion, or mixed open-ended assistance.",
             fallback=True,
         ),
-        "middleware": _agent_middleware(metrics, "root.general-purpose", model, backend),
+        "middleware": [
+            ToolAllowlistMiddleware({"read_file", *custom_tool_names}, "general-purpose"),
+            *_agent_middleware(metrics, "root.general-purpose", model, backend),
+        ],
         "skills": skill_sources.source("general-purpose", shared_refs=(_shared_skill("web-search"),)),
         "tools": [],
         "system_prompt": """你是 Aperio 的通用智能体（general-purpose）。
@@ -1776,7 +1832,8 @@ def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: Agen
 - 如果输入中包含图片、文档或代码附件摘要，先说明你基于可见文本/摘要处理；如果缺少必要内容，向用户说明需要补充。
 - 不要创建 /outputs/code_health/code_health_report.md、/outputs/prd_review/prd_v2_final.md 或 /outputs/prd_review/review_matrix.md，除非用户明确要求进入对应专用工作流。
 - 对天气、城市/地址查询、经纬度解析、周边搜索、距离计算和路线规划请求，优先使用可用的高德地图 MCP 工具（名称通常以 maps_ 开头），不要只凭常识回答。
-- 用户说“明天”“今天”等相对日期时，结合当前日期判断；天气类问题若未给出地点，先基于上下文推断，不足时说明需要地点。
+- 天气类问题必须调用 maps_weather；如果用户未提供城市，先用 maps_ip_location 获取粗略城市，定位成功后必须继续调用 maps_weather 查询该城市天气，并说明“按 IP 粗略定位”；不能在只调用 maps_ip_location 后结束回答；只有 IP 定位失败或无法得到城市时才追问城市。
+- 用户说“明天”“今天”等相对日期时，结合当前日期判断。
 
 边界：
 - 不要假装已经读取不存在的附件内容。
@@ -2113,7 +2170,13 @@ PRD 使用中文撰写。""",
         subagents=prd_review_orchestrator["subagents"],
         name=prd_review_orchestrator["name"],
     )
-    general_purpose = _general_purpose_agent(metrics, model, backend, skill_sources)
+    general_purpose = _general_purpose_agent(
+        metrics,
+        model,
+        backend,
+        skill_sources,
+        set(_tool_names(general_purpose_tools)),
+    )
     general_purpose["tools"] = general_purpose_tools
     general_purpose["runnable"] = create_deep_agent(
         model=model,
@@ -2137,7 +2200,7 @@ PRD 使用中文撰写。""",
     print_backend_debug(run_root, local_resources, sandbox)
     print_sandbox_tool_debug(sandbox)
     print_subagent_debug(subagent_specs, backend)
-    print_tool_debug(subagent_specs, [*custom_tools, *mcp_tools.general_purpose])
+    print_tool_debug(subagent_specs, custom_tools, general_purpose_tools)
     print_subagent_middleware_debug(subagent_specs)
     print_middleware_debug(user_middleware)
 
@@ -2192,6 +2255,11 @@ PRD 使用中文撰写。""",
 
     # ---- Output ----
     print(f"\n{'=' * 60}")
+    final_answer = extract_final_answer(resp)
+    if final_answer:
+        print("\n💬 Agent answer:")
+        print(final_answer)
+        print(f"\n{'=' * 60}")
 
     # Performance
     m = metrics.to_dict()
@@ -2219,6 +2287,7 @@ PRD 使用中文撰写。""",
 if __name__ == "__main__":
     main()
 
-# 两个输入测试
+# 3个输入测试
 # 我需要为「智慧校园导航助手」写一份 PRD 并评审。这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，同时提供校园活动推荐和实时拥挤度信息。
 # 对full-stack-fastapi-template-master\backend\app\core做完整的代码检查。
+# 明天天气如何？要带伞吗？
