@@ -588,7 +588,9 @@ def print_tool_debug(subagents: list[dict], custom_tools: list) -> None:
     print("  inheritance: declared subagents without a tools field inherit the main agent tool set.")
     for name, spec in _collect_subagents(subagents):
         if "runnable" in spec:
-            print(f"  - {name}: tools=preconfigured in compiled runnable [no parent inheritance]")
+            tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in spec.get("tools", [])]
+            suffix = f" custom={tool_names}" if tool_names else " custom=preconfigured"
+            print(f"  - {name}: tools=preconfigured in compiled runnable [no parent inheritance]{suffix}")
         elif "tools" in spec:
             tool_names = [getattr(tool_item, "name", getattr(tool_item, "__name__", str(tool_item))) for tool_item in spec["tools"]]
             print(f"  - {name}: tools={tool_names} [override]")
@@ -1765,6 +1767,7 @@ def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: Agen
         ),
         "middleware": _agent_middleware(metrics, "root.general-purpose", model, backend),
         "skills": skill_sources.source("general-purpose", shared_refs=(_shared_skill("web-search"),)),
+        "tools": [],
         "system_prompt": """你是 Aperio 的通用智能体（general-purpose）。
 
 职责：
@@ -1772,6 +1775,8 @@ def _general_purpose_agent(metrics: Metrics, model, backend, skill_sources: Agen
 - 可以基于用户原始输入和 /inputs/input_bundle.json 中的标准化输入上下文回答。
 - 如果输入中包含图片、文档或代码附件摘要，先说明你基于可见文本/摘要处理；如果缺少必要内容，向用户说明需要补充。
 - 不要创建 /outputs/code_health/code_health_report.md、/outputs/prd_review/prd_v2_final.md 或 /outputs/prd_review/review_matrix.md，除非用户明确要求进入对应专用工作流。
+- 对天气、城市/地址查询、经纬度解析、周边搜索、距离计算和路线规划请求，优先使用可用的高德地图 MCP 工具（名称通常以 maps_ 开头），不要只凭常识回答。
+- 用户说“明天”“今天”等相对日期时，结合当前日期判断；天气类问题若未给出地点，先基于上下文推断，不足时说明需要地点。
 
 边界：
 - 不要假装已经读取不存在的附件内容。
@@ -2109,6 +2114,7 @@ PRD 使用中文撰写。""",
         name=prd_review_orchestrator["name"],
     )
     general_purpose = _general_purpose_agent(metrics, model, backend, skill_sources)
+    general_purpose["tools"] = general_purpose_tools
     general_purpose["runnable"] = create_deep_agent(
         model=model,
         tools=general_purpose_tools,
