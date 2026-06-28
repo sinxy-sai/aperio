@@ -7,6 +7,12 @@ description: Reusable code-health scanning toolkit for Python projects. Use when
 
 Use this skill when deterministic code-health evidence is needed before LLM review. The bundled script is portable: it can run inside Aperio's Docker sandbox or directly in another Python project environment.
 
+## Execution Order
+
+When this skill is used as the first stage of a code-health workflow, run the toolkit script before reading source files. Do not call `ls`, `glob`, `grep`, or `read_file` to explore the target code before the script has produced `tool_results.json`.
+
+After `tool_results.json` exists, use its `discovery`, `tool_coverage`, and `findings` fields to decide which files, if any, need targeted follow-up reading.
+
 ## Script
 
 Run:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable code-health scanner used by Aperio and standalone skill users."""
+"""Portable code-health scanner used."""
 from __future__ import annotations
 
 import argparse
@@ -429,21 +429,48 @@ def normalize_findings(tool_results: dict[str, Any], project_root: Path) -> list
     return findings
 
 
+def _single_tool_status(result: dict[str, Any]) -> str:
+    if result.get("skipped"):
+        return "skipped"
+    if result.get("timed_out"):
+        return "timed_out"
+    if not result.get("available", False):
+        return "unavailable"
+    if result.get("exit_code") == 0:
+        return "completed"
+    if result.get("exit_code") is not None:
+        return "completed_nonzero_exit"
+    return "unknown"
+
+
+def _composite_tool_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    component_statuses: list[str] = []
+    for component in ("cc", "mi", "raw", "run", "json_export"):
+        child = result.get(component)
+        if isinstance(child, dict):
+            component_statuses.append(_single_tool_status(child))
+
+    if not component_statuses:
+        return _single_tool_status(result), component_statuses
+    if any(status == "completed" for status in component_statuses):
+        if any(status in {"timed_out", "unavailable", "unknown"} for status in component_statuses):
+            return "partial", component_statuses
+        return "completed", component_statuses
+    if any(status == "completed_nonzero_exit" for status in component_statuses):
+        return "completed_nonzero_exit", component_statuses
+    if any(status == "timed_out" for status in component_statuses):
+        return "timed_out", component_statuses
+    if all(status == "skipped" for status in component_statuses):
+        return "skipped", component_statuses
+    if all(status == "unavailable" for status in component_statuses):
+        return "unavailable", component_statuses
+    return "unknown", component_statuses
+
+
 def tool_coverage_summary(tools: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for name, result in tools.items():
-        if result.get("skipped"):
-            status = "skipped"
-        elif result.get("timed_out"):
-            status = "timed_out"
-        elif not result.get("available", False):
-            status = "unavailable"
-        elif result.get("exit_code") == 0:
-            status = "completed"
-        elif result.get("exit_code") is not None:
-            status = "completed_nonzero_exit"
-        else:
-            status = "unknown"
+        status, component_statuses = _composite_tool_status(result)
         summary[name] = {
             "status": status,
             "available": result.get("available", False),
@@ -453,6 +480,8 @@ def tool_coverage_summary(tools: dict[str, dict[str, Any]]) -> dict[str, dict[st
             "reason": result.get("reason", ""),
             "command": result.get("command", ""),
         }
+        if component_statuses:
+            summary[name]["component_statuses"] = component_statuses
     return summary
 
 
@@ -544,6 +573,7 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
     if radon_cc.get("available"):
         radon_result = {
             "available": True,
+            "command": f"radon cc/mi/raw {shlex.quote(target_rel)} --json",
             "cwd": str(project_root),
             "cc": radon_cc,
             "mi": run_command(f"radon mi {shlex.quote(target_rel)} --json --show", project_root, max_output=30000, timeout_seconds=60),

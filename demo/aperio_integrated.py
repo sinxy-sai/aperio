@@ -875,6 +875,12 @@ def _install_observable_summarization_profile(*model_specs: str) -> None:
 def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backend) -> list:
     """Return the 5 sub-agents for code health orchestration."""
     language_rule = "全文使用中文；工具名、文件路径、命令、错误码可以保留英文原文。"
+    evidence_budget = (
+        f"证据读取预算：必须先读取 {ws}/raw/tool_results.json；"
+        "除非需要复核具体 High/Medium finding 或补足报告必要证据，不要读取源码。"
+        "需要读取时只使用 read_file 定向读取 tool_results.json 中出现的具体文件，最多 3 个文件；"
+        "不要使用 ls、glob、grep 或 execute 做泛探索。"
+    )
     return [
         {
             "name": "architect",
@@ -883,6 +889,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 
 你是代码架构师。按 code-architect skill 分析 `{target}`。
 输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
+{evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/architect.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
@@ -895,6 +902,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 
 你是应用安全工程师。按 code-security skill 审计 `{target}`。
 输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
+{evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/security.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
@@ -907,6 +915,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 
 你是依赖管理专家。按 code-dependency skill 检查 `{target}`。
 输入：先读取 {ws}/raw/tool_results.json，必要时读取依赖清单。
+{evidence_budget}
 联网：默认不要联网；只有 skill 允许且确有必要时最多调用 1 次 internet_search，save_path={ws}/raw/web_search/dependency-advisories.json。
 输出：只写入 Markdown 草稿 {ws}/drafts/dependencies.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
@@ -920,6 +929,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 
 你是技术文档专家。按 code-documentation skill 评估 `{target}`。
 输入：先读取 {ws}/raw/tool_results.json，必要时读取 README 和目标源码。
+{evidence_budget}
 输出：只写入 Markdown 草稿 {ws}/drafts/documentation.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
@@ -933,7 +943,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 你是报告汇总专家。按 report-writing skill 合并代码健康报告。
 输入：读取 {ws}/raw/tool_results.json，以及四个标准草稿 {ws}/drafts/architect.md、{ws}/drafts/security.md、{ws}/drafts/dependencies.md、{ws}/drafts/documentation.md。
 输出：只写入 Markdown 最终报告 {ws}/code_health_report.md。
-禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证。
+禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证；不要读取源码或做新的代码探索。
 完成写入后立即停止。""",
             "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
@@ -1284,28 +1294,33 @@ def main():
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
         "skills": _agent_skills(_skill_dir("code-health")),
         "middleware": _agent_middleware(metrics, "root.code-health-orchestrator", model, backend),
-        "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
+        "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。
 
-1. 使用 write_todos 规划任务
-2. 按 code-health-toolkit skill 使用 execute 运行脚本：
+第一动作硬约束：
+1. 收到 code-health 任务后的第一个工具调用必须是 execute，且命令必须精确使用：
    `python /skills/code-health/code-health-toolkit/scripts/run_checks.py --project-root {SANDBOX_PROJECT_ROOT} --target app/core --out {code_ws}/raw/tool_results.json --summary`
-   这是唯一允许的代码体检扫描命令；不要手写 ruff/mypy/bandit/radon/detect-secrets 等单独命令替代它
-3. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
-4. 必须使用 task 工具并行派发 4 个已声明子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
+2. 在 {code_ws}/raw/tool_results.json 生成之前，禁止调用 write_todos、task、ls、read_file、glob、grep、internet_search 或任何源码探索工具。
+3. 不要手写 ruff/mypy/bandit/radon/detect-secrets/deptry/interrogate 等单独命令替代 toolkit 脚本。
+4. 扫描成功后，先读取 {code_ws}/raw/tool_results.json；再使用 write_todos 规划后续编排。
+
+扫描后的工作流程：
+1. 可读取 /local-resources/aperio_policy.yaml 了解安全和存储策略。
+2. 必须使用 task 工具并行派发 4 个已声明子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
    - architect：架构分析
    - security-analyst：安全审计
    - dependency-checker：依赖检查
    - doc-reviewer：文档评估
    每个子代理将结果写入 {code_ws}/drafts/
-5. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告
-6. summarizer 的唯一最终产物必须是 Markdown 文件 {code_ws}/code_health_report.md；不要接受 HTML、JSON、/outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告
-7. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件
-8. 如有 /memories/history/ 中的历史数据，进行趋势对比
+3. 等待全部 4 个完成后，派发 summarizer 合并生成最终报告。
+4. summarizer 的唯一最终产物必须是 Markdown 文件 {code_ws}/code_health_report.md；不要接受 HTML、JSON、/outputs/*.md 或 {code_ws}/drafts/merged-report.md 作为最终报告。
+5. summarizer 写入最终报告后流程结束；不要再使用 execute 验证、复制、重写或另存 /outputs/ 中的文件。
+6. 如有 /memories/history/ 中的历史数据，可在扫描完成后进行趋势对比。
 
 硬性约束：
 - code-health 的 4 个草稿和最终报告必须全文使用中文，包括标题、表头、段落、结论和建议；工具名、文件路径、命令、错误码可以保留英文原文
 - internet_search 是只读联网工具，只能作为公开资料补充；代码事实、扫描结论和最终风险判定必须优先来自本地代码、{code_ws}/raw/tool_results.json 和草稿报告
 - 如果引用 internet_search 结果，必须明确标注其为公开网络证据，并保留链接；联网失败时不要编造公开资料
+- orchestrator 自己不要在扫描后泛读源码；源码阅读由叶子子代理按工具发现的位置少量定向完成
 - 必须先得到这 4 个草稿文件：{code_ws}/drafts/architect.md、{code_ws}/drafts/security.md、{code_ws}/drafts/dependencies.md、{code_ws}/drafts/documentation.md
 - 这 4 个草稿必须由对应叶子子代理写入；code-health-orchestrator 自己不得调用 write_file 代写 {code_ws}/drafts/*.md
 - 派发子代理时必须使用这些精确名称：architect、security-analyst、dependency-checker、doc-reviewer；不要创建临时分析角色、不要把多个维度合并给同一个子代理
