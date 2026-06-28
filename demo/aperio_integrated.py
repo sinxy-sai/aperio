@@ -143,6 +143,16 @@ class ObservedTaskOutputs:
         return labels
 
 
+@dataclass(frozen=True)
+class AgentSpec:
+    name: str
+    description: str
+    accepted_inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
+    route_when: str
+    fallback: bool = False
+
+
 def read_runtime_task() -> str:
     """Read the user task at runtime; empty input means the current workspace."""
     print("\n请输入任务，例如：对 path/to/project/src 做完整的代码健康检查，或为某个产品想法写 PRD 并评审")
@@ -236,6 +246,68 @@ def resolve_optional_code_context(task_text: str) -> tuple[Path, str, Path, bool
     project_root = _PROJECT_ROOT.resolve()
     return project_root, ".", project_root, False
 
+
+def build_input_bundle(
+    run_id: str,
+    task_text: str,
+    code_project_path: Path,
+    code_target_rel: str,
+    code_target_path: Path,
+    code_context_found: bool,
+) -> dict[str, object]:
+    """Build the normalized runtime input bundle consumed by the Main Router."""
+    attachments: list[dict[str, object]] = []
+    if code_context_found:
+        attachments.append({
+            "id": "code_context_1",
+            "type": "directory" if code_target_path.is_dir() else "file",
+            "path": str(code_target_path),
+            "mount_path": SANDBOX_PROJECT_ROOT if code_target_rel == "." else f"{SANDBOX_PROJECT_ROOT}/{code_target_rel}",
+            "project_root": str(code_project_path),
+            "sandbox_project_root": SANDBOX_PROJECT_ROOT,
+            "target_relative_path": code_target_rel,
+            "purpose_hint": "candidate input for code-health if the Main Router selects that agent",
+        })
+
+    return {
+        "schema_version": "aperio-input-bundle-v1",
+        "run_id": run_id,
+        "user_text": task_text,
+        "attachments": attachments,
+        "resolved_paths": [
+            {
+                "kind": "code_context",
+                "found": code_context_found,
+                "host_project_root": str(code_project_path),
+                "host_target_path": str(code_target_path),
+                "sandbox_project_root": SANDBOX_PROJECT_ROOT,
+                "target_relative_path": code_target_rel,
+            }
+        ],
+        "runtime_context": {
+            "inputs": "/inputs",
+            "outputs": "/outputs",
+            "memories": "/memories",
+            "temp": "/temp",
+            "local_resources": "/local-resources",
+            "skills": "/skills",
+        },
+        "routing_policy": {
+            "router_decides_task": True,
+            "host_path_resolution_is_context_only": True,
+            "fallback_agent": "general-purpose",
+        },
+    }
+
+
+def write_input_bundle(run_root: Path, bundle: dict[str, object]) -> Path:
+    inputs_dir = run_root / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = inputs_dir / "input_bundle.json"
+    bundle_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+    return bundle_path
+
+
 def _skill_dir(name: str) -> str:
     """Build a virtual skill source routed through CompositeBackend."""
     return "/skills/" + name.replace("\\", "/").strip("/")
@@ -271,6 +343,7 @@ def setup_local_resources(code_target_rel: str = ".") -> Path:
     evidence_rule: "web snippets are supplemental; local files and tool results remain authoritative"
 storage:
   default: docker_sandbox
+  inputs: filesystem
   outputs: filesystem
   temp: state
   memories: store
@@ -340,6 +413,7 @@ def _collect_subagents(subagents: list[dict], parent: str = "root") -> list[tupl
 def print_backend_debug(run_root: Path, local_resources: Path, sandbox: "AgentDockerSandbox") -> None:
     print("\n[debug] CompositeBackend routes")
     print(f"  default: DockerSandbox image={sandbox.image} container={sandbox.id[:12] if sandbox.id != 'closed' else 'closed'}")
+    print(f"  /inputs/ -> FilesystemBackend({run_root / 'inputs'}) [write denied]")
     print(f"  /outputs/ -> FilesystemBackend({run_root})")
     print("  /memories/ -> StoreBackend(namespace=aperio)")
     print("  /temp/ -> StateBackend()")
@@ -446,6 +520,35 @@ def print_expected_outputs(run_root: Path, observed: ObservedTaskOutputs) -> Non
         status = "OK" if path.exists() and path.stat().st_size > 0 else "MISSING"
         size = path.stat().st_size if path.exists() else 0
         print(f"  {status:7} {path.relative_to(run_root)} ({size} bytes)")
+
+
+def router_prompt_from_registry(agent_specs: list[AgentSpec]) -> str:
+    lines = [
+        "你是 Aperio 的 Main Router。你的唯一职责是读取用户请求和 /inputs/input_bundle.json 的输入摘要，然后用 task 工具委托给合适的 agent。",
+        "",
+        "可用 agent registry：",
+    ]
+    for spec in agent_specs:
+        fallback = "；fallback agent" if spec.fallback else ""
+        lines.extend([
+            f"- {spec.name}{fallback}",
+            f"  描述：{spec.description}",
+            f"  适用条件：{spec.route_when}",
+            f"  接受输入：{', '.join(spec.accepted_inputs)}",
+            f"  产物：{', '.join(spec.outputs)}",
+        ])
+    lines.extend([
+        "",
+        "路由规则：",
+        "- 如果一个专用 agent 明确匹配用户请求，调用 task 委托给该 agent。",
+        "- 如果用户同时明确要求多个专用任务，分别调用 task 委托给对应 agent。",
+        "- 如果没有专用 agent 明确匹配，委托给 general-purpose，不要拒绝普通请求。",
+        "- 委托时必须原样传递用户原始请求、/inputs/input_bundle.json 路径、以及消息中的运行时环境上下文。",
+        "- 不要自己调用 ls、glob、grep、read_file、execute、write_file 或 internet_search；你只能使用 task。",
+        "- 不要自己分析代码、撰写 PRD、读文件、联网搜索或写报告。",
+        "- 委托完成后直接返回结果，不要做额外验证或文件检查。",
+    ])
+    return "\n".join(lines)
 
 
 def _is_approval_choice(choice: str) -> bool:
@@ -1140,20 +1243,10 @@ class RouterToolGuardMiddleware(AgentMiddleware):
     """Keep the main router as a pure delegator."""
 
     allowed_tools = {"task"}
-    router_prompt = """You are Aperio's Main Router. Your only job is task classification and delegation.
 
-Routing rules:
-- For code analysis, code health checks, or quality scans, call task and delegate to code-health-orchestrator.
-- For PRD writing, PRD review, or product requirements documents, call task and delegate to prd-review-orchestrator.
-- If the user asks for both, call task separately for both orchestrators.
-- If the request is outside these two task families, briefly say this demo only supports code-health and prd-review.
-
-Hard constraints:
-- Use only the task tool for delegation. Do not use ls, glob, grep, read_file, execute, write_file, or internet_search.
-- When delegating, pass the user's original request and any runtime environment context from the user message to the selected orchestrator.
-- Do not explore files, read source code, search the web, analyze code, write PRDs, or write reports.
-- After delegation, wait for the orchestrator result. Do not perform extra validation or file checks.
-- If other tools are visible, ignore them."""
+    def __init__(self, router_prompt: str):
+        super().__init__()
+        self.router_prompt = router_prompt
 
     @staticmethod
     def _tool_name(tool) -> str:
@@ -1186,7 +1279,7 @@ Hard constraints:
         return ToolMessage(
             content=(
                 "Main Router is a pure routing agent. Direct tool use is blocked here; "
-                "delegate to code-health-orchestrator or prd-review-orchestrator with the task tool."
+                "delegate to a registered agent with the task tool."
             ),
             tool_call_id=request.tool_call["id"],
             name=tool_name,
@@ -1439,6 +1532,35 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
     ]
 
 
+def _general_purpose_agent(metrics: Metrics, model, backend) -> dict:
+    return {
+        "name": "general-purpose",
+        "description": "Handle open-ended requests that do not match specialized code-health or PRD workflows",
+        "agent_spec": AgentSpec(
+            name="general-purpose",
+            description="Handle requests that do not fit a specialized workflow; answer normally using available context without creating code-health or PRD artifacts unless asked.",
+            accepted_inputs=("text", "documents", "images described in the input bundle", "code snippets", "general files"),
+            outputs=("direct assistant response",),
+            route_when="Use when no specialized agent clearly matches, or the request is ordinary Q&A, explanation, brainstorming, translation, image/document discussion, or mixed open-ended assistance.",
+            fallback=True,
+        ),
+        "skills": _agent_skills(),
+        "middleware": _agent_middleware(metrics, "root.general-purpose", model, backend),
+        "system_prompt": """你是 Aperio 的通用智能体（general-purpose）。
+
+职责：
+- 处理不适合 code-health 或 prd-review 专用工作流的普通请求。
+- 可以基于用户原始输入和 /inputs/input_bundle.json 中的标准化输入上下文回答。
+- 如果输入中包含图片、文档或代码附件摘要，先说明你基于可见文本/摘要处理；如果缺少必要内容，向用户说明需要补充。
+- 不要创建 /outputs/code_health/code_health_report.md、/outputs/prd_review/prd_v2_final.md 或 /outputs/prd_review/review_matrix.md，除非用户明确要求进入对应专用工作流。
+
+边界：
+- 不要假装已经读取不存在的附件内容。
+- 不要把普通问答升级成 code-health 或 prd-review 产物。
+- 如需联网搜索，可使用 internet_search，并明确区分公开网络证据和用户提供事实。""",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1486,6 +1608,15 @@ def main():
     code_ws = "/outputs/code_health"
     prd_ws = "/outputs/prd_review"
     local_resources = setup_local_resources(code_target_rel)
+    input_bundle = build_input_bundle(
+        run_id,
+        runtime_task,
+        code_project_path,
+        code_target_rel,
+        code_target_path,
+        code_context_found,
+    )
+    input_bundle_path = write_input_bundle(run_root, input_bundle)
     (run_root / "code_health" / "drafts").mkdir(parents=True, exist_ok=True)
     (run_root / "prd_review" / "drafts").mkdir(parents=True, exist_ok=True)
 
@@ -1503,6 +1634,7 @@ def main():
     backend = CompositeBackend(
         default=sandbox,
         routes={
+            "/inputs/": FilesystemBackend(root_dir=str(run_root / "inputs"), virtual_mode=True),
             "/outputs/": FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
             "/memories/": StoreBackend(store=store, namespace=lambda rt: ("aperio",)),
             "/temp/": StateBackend(),
@@ -1515,6 +1647,11 @@ def main():
         FilesystemPermission(
             operations=["write"],
             paths=["/outputs/*"],
+            mode="deny",
+        ),
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/inputs/**"],
             mode="deny",
         ),
         FilesystemPermission(
@@ -1551,6 +1688,7 @@ def main():
     # ---- Middleware ----
     metrics = Metrics()
     root_observability = _agent_middleware(metrics, "root", model, backend)
+    router_guard = RouterToolGuardMiddleware("")
     user_middleware: list[AgentMiddleware] = [
         ModelCallLimitMiddleware(
             run_limit=100,
@@ -1563,7 +1701,7 @@ def main():
             on_failure="error",
         ),
         ModelFallbackMiddleware(fallback_model),
-        RouterToolGuardMiddleware(),
+        router_guard,
         *root_observability,
         ToolRetryMiddleware(
             tools=["ls", "glob", "grep", "read_file", "internet_search"],
@@ -1592,6 +1730,13 @@ def main():
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
+        "agent_spec": AgentSpec(
+            name="code-health-orchestrator",
+            description="Run deterministic code health checks, dispatch code review subagents, and produce a Chinese code health report.",
+            accepted_inputs=("directory", "repository", "single code file", "pasted code after it has been materialized under /inputs"),
+            outputs=("/outputs/code_health/code_health_report.md",),
+            route_when="User asks for code analysis, code health checks, code quality review, repository scan, static analysis, security/dependency/documentation/complexity checks.",
+        ),
         "skills": _agent_skills(_skill_dir("code-health")),
         "middleware": [
             ToolAllowlistMiddleware({"execute", "read_file", "task", "write_todos"}, "code-health orchestrator"),
@@ -1647,6 +1792,13 @@ def main():
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
+        "agent_spec": AgentSpec(
+            name="prd-review-orchestrator",
+            description="Draft PRD v1 from user requirements, run product/tech/UX/risk review, and produce PRD v2 plus review matrix.",
+            accepted_inputs=("text requirements", "product brief", "Markdown/document text", "document-derived text from /inputs"),
+            outputs=("/outputs/prd_review/prd_v2_final.md", "/outputs/prd_review/review_matrix.md"),
+            route_when="User asks to write, refine, or review a PRD, product requirements document, feature requirements, or review matrix.",
+        ),
         "skills": _agent_skills(_skill_dir("prd-review")),
         "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
@@ -1705,7 +1857,25 @@ PRD 使用中文撰写。""",
         subagents=prd_review_orchestrator["subagents"],
         name=prd_review_orchestrator["name"],
     )
-    subagent_specs = [code_health_orchestrator, prd_review_orchestrator]
+    general_purpose = _general_purpose_agent(metrics, model, backend)
+    general_purpose["runnable"] = create_deep_agent(
+        model=model,
+        tools=custom_tools,
+        backend=backend,
+        checkpointer=checkpointer,
+        middleware=general_purpose["middleware"],
+        permissions=permissions,
+        skills=general_purpose["skills"],
+        interrupt_on=root_interrupt_on,
+        system_prompt=general_purpose["system_prompt"],
+        name=general_purpose["name"],
+    )
+    subagent_specs = [code_health_orchestrator, prd_review_orchestrator, general_purpose]
+    router_guard.router_prompt = router_prompt_from_registry([
+        spec["agent_spec"]
+        for spec in subagent_specs
+        if "agent_spec" in spec
+    ])
 
     print_backend_debug(run_root, local_resources, sandbox)
     print_sandbox_tool_debug(sandbox)
@@ -1724,21 +1894,14 @@ PRD 使用中文撰写。""",
         permissions=permissions,
         skills=_agent_skills(),
         interrupt_on=root_interrupt_on,
-        system_prompt="""你是 Aperio 研发质量平台的**任务路由器**。根据用户输入判断任务类型：
-
-- 如果用户要求**分析代码、代码体检、代码健康检查**→ 委托给 code-health-orchestrator
-- 如果用户要求**写 PRD、评审需求、产品需求文档**→ 委托给 prd-review-orchestrator
-- 如果用户同时要求两类任务，分别委托给两个 Orchestrator
-- 如果用户请求不属于上述两类，简短说明当前 demo 只支持 code-health 和 prd-review
-
-委托时必须把用户原始请求和消息中的运行时环境上下文原样传给对应 Orchestrator。
-你的职责只是识别任务类型并路由到正确的 Orchestrator。不要自己调用工具、读取文件、联网搜索、分析代码、撰写 PRD 或写入报告。""",
+        system_prompt=router_guard.router_prompt,
         subagents=subagent_specs,
     )
 
     print(f"\n{'─' * 60}")
     print("Task: Main Router")
     print(f"User: {runtime_task or '<empty>'}")
+    print(f"Input bundle: {input_bundle_path.relative_to(run_root)}")
     print(f"Code context: {'resolved' if code_context_found else 'not provided; /workspace/project is the demo root'}")
     print(f"Project mount: {code_project_path}")
     print(f"Target hint:   {code_target_rel}")
@@ -1753,13 +1916,14 @@ PRD 使用中文撰写。""",
                 "content": (
                     f"{runtime_task}\n\n"
                     "运行时环境上下文："
+                    "标准化输入包已写入 `/inputs/input_bundle.json`；"
                     "如果你判断这是 code-health 任务，代码项目已挂载到沙盒 `/workspace/project`；"
                     f"可用的扫描目标相对项目根路径提示是 `{code_target_rel}`；"
                     "原始工具结果必须写入 `/outputs/code_health/raw/tool_results.json`。"
                     "如果你判断这是 prd-review 任务，请完全基于用户输入编写和评审 PRD，"
                     "不要使用任何内置测试示例或默认产品设定。"
                     "如果用户同时要求两类任务，请分别委托两个 orchestrator；"
-                    "如果两类都不是，请直接说明当前 demo 只支持 code-health 和 prd-review。"
+                    "如果两类都不是，请委托 general-purpose 处理。"
                 ),
             }],
         },
