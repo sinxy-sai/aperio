@@ -333,14 +333,19 @@ _INLINE_CODE_EXECUTE_RE = re.compile(
     r"\b(python|python3|node|ruby|perl|bash|sh)\s+(-c|-m\s+pip|<<|-)\b",
     re.IGNORECASE,
 )
+_SCRIPT_OR_MODULE_EXECUTE_RE = re.compile(
+    r"(^|[\s;&|])(?:python(?:3)?|node|ruby|perl|bash|sh)\s+"
+    r"(?:-m\s+[A-Za-z0-9_.-]+|[^\s;&|<>]+\.(?:py|js|mjs|cjs|rb|pl|sh|bash))\b",
+    re.IGNORECASE,
+)
 
 
 def _execute_requires_approval(request) -> bool:
     """Return True only for high-risk shell commands.
 
     Low-risk read commands and output-directory setup should not trigger HITL;
-    destructive operations, dependency installs, shell redirection, and inline
-    code still require human approval.
+    destructive operations, dependency installs, shell redirection, inline code,
+    and script/module execution still require human approval.
     """
     args = request.tool_call.get("args", {})
     command = str(args.get("command") or "").strip()
@@ -351,6 +356,8 @@ def _execute_requires_approval(request) -> bool:
     if _HIGH_RISK_EXECUTE_RE.search(command):
         return True
     if _INLINE_CODE_EXECUTE_RE.search(command):
+        return True
+    if _SCRIPT_OR_MODULE_EXECUTE_RE.search(command):
         return True
     return False
 
