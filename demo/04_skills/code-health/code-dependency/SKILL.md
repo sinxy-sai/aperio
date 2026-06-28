@@ -1,12 +1,6 @@
 ---
 name: code-dependency
 description: Use when checking project dependencies — outdated versions, known CVEs, license compatibility, unused imports, and missing transitive dependencies
-triggers:
-  - 依赖检查
-  - 包审计
-  - 版本分析
-  - CVE 扫描
-  - 许可证检查
 ---
 
 ## 角色定义

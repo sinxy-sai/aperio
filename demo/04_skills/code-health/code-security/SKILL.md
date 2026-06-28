@@ -1,12 +1,6 @@
 ---
 name: code-security
 description: Use when auditing code for security vulnerabilities — SQL injection, XSS, hardcoded secrets, insecure deserialization, path traversal, and missing authentication
-triggers:
-  - 安全扫描
-  - 漏洞检测
-  - 安全审计
-  - SQL 注入
-  - 硬编码密钥
 ---
 
 ## 角色定义

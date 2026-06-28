@@ -1,12 +1,6 @@
 ---
 name: code-documentation
 description: Use when evaluating documentation quality — README completeness, API docstring coverage, comment quality, configuration documentation, and onboarding guides
-triggers:
-  - 文档评估
-  - 文档质量
-  - README 检查
-  - API 文档
-  - 注释覆盖率
 ---
 
 ## 角色定义

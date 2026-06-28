@@ -104,8 +104,8 @@ def _skill_dir(name: str) -> str:
 
 
 def _shared_skill_dir() -> str:
-    """Return the root shared-skill source under /skills/."""
-    return _skill_dir("")
+    """Return the shared-skill source under /skills/shared."""
+    return _skill_dir("shared")
 
 
 def _agent_skills(*sources: str) -> list[str]:
@@ -159,7 +159,7 @@ code_health:
       - interrogate
       - radon
       - detect-secrets
-    schema: code-health-tools-v4
+    schema: code-health-tools-v5
     install_project_deps_default: false
     mypy_default_mode: lightweight_ignore_missing_imports
     mypy_limitation: "project dependencies are not installed by default; mypy results are partial and not CI-equivalent"
@@ -365,6 +365,7 @@ class DockerSandbox:
         image: str = SANDBOX_IMAGE,
         working_dir: str = "/workspace",
         remove_on_close: bool = True,
+        volumes: dict[str, dict[str, str]] | None = None,
     ):
         try:
             import docker
@@ -382,6 +383,7 @@ class DockerSandbox:
             detach=True,
             working_dir=self.working_dir,
             remove=self.remove_on_close,
+            volumes=volumes,
         )
         print(f"Docker sandbox: started {self.container.id[:12]} ({self.image})")
 
@@ -573,8 +575,13 @@ class DockerSandbox:
 class AgentDockerSandbox(SandboxBackendProtocol):
     """Adapter that exposes DockerSandbox through SandboxBackendProtocol."""
 
-    def __init__(self, target_project: Path) -> None:
-        self._sandbox = DockerSandbox()
+    def __init__(self, target_project: Path, skills_dir: Path, outputs_dir: Path) -> None:
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        volumes = {
+            str(skills_dir.resolve()): {"bind": "/skills", "mode": "ro"},
+            str(outputs_dir.resolve()): {"bind": "/outputs", "mode": "rw"},
+        }
+        self._sandbox = DockerSandbox(volumes=volumes)
         self._sandbox.seed_directory(target_project, SANDBOX_PROJECT_ROOT)
 
     @property
@@ -615,225 +622,6 @@ class AgentDockerSandbox(SandboxBackendProtocol):
 
     def close(self) -> None:
         self._sandbox.close()
-
-
-def _run_sandbox_json(sandbox: AgentDockerSandbox, code: str, cwd: str = SANDBOX_PROJECT_ROOT) -> dict:
-    command = "python -c " + shlex.quote(code)
-    output, exit_code = sandbox._sandbox.execute(f"cd {shlex.quote(cwd)} && {command}")
-    if exit_code != 0:
-        return {"ok": False, "exit_code": exit_code, "error": output.strip()}
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError:
-        return {"ok": False, "exit_code": exit_code, "error": output.strip()}
-
-
-def _relative_sandbox_path(path: str, root: str = SANDBOX_PROJECT_ROOT) -> str:
-    normalized_path = path.rstrip("/")
-    normalized_root = root.rstrip("/")
-    if normalized_path == normalized_root:
-        return "."
-    if normalized_path.startswith(normalized_root + "/"):
-        return normalized_path[len(normalized_root) + 1:]
-    return normalized_path
-
-
-def _optional_command(
-    sandbox: AgentDockerSandbox,
-    command: str,
-    cwd: str = SANDBOX_PROJECT_ROOT,
-    timeout_hint: str = "",
-    max_output: int = 20000,
-    timeout_seconds: int | None = None,
-) -> dict:
-    executable = shlex.split(command)[0] if command.strip() else ""
-    check_cmd = "command -v " + shlex.quote(executable) + " >/dev/null 2>&1"
-    _, found = sandbox._sandbox.execute(check_cmd)
-    if found != 0:
-        return {"available": False, "command": command, "cwd": cwd, "reason": "command not installed"}
-    output, exit_code = sandbox._sandbox.execute(
-        f"cd {shlex.quote(cwd)} && {command}",
-        timeout=timeout_seconds,
-    )
-    result = {
-        "available": True,
-        "command": command,
-        "cwd": cwd,
-        "exit_code": exit_code,
-        "output": output[:max_output],
-        "output_truncated": len(output) > max_output,
-        "note": timeout_hint,
-    }
-    if timeout_seconds is not None:
-        result["timeout_seconds"] = timeout_seconds
-        if exit_code == 124:
-            result["timed_out"] = True
-    stripped = output.strip()
-    if stripped:
-        try:
-            result["json"] = json.loads(stripped)
-        except json.JSONDecodeError:
-            json_start = min(
-                [idx for idx in (stripped.find("{"), stripped.find("[")) if idx >= 0],
-                default=-1,
-            )
-            if json_start >= 0:
-                try:
-                    result["json"] = json.loads(stripped[json_start:])
-                except json.JSONDecodeError:
-                    pass
-    return result
-
-
-def _optional_python_module(
-    sandbox: AgentDockerSandbox,
-    module: str,
-    args: str,
-    cwd: str = SANDBOX_PROJECT_ROOT,
-    timeout_hint: str = "",
-    max_output: int = 20000,
-    timeout_seconds: int | None = None,
-) -> dict:
-    """Run an optional Python module command inside the Docker sandbox."""
-    check_cmd = (
-        "python -c "
-        + shlex.quote(f"import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module!r}) else 1)")
-    )
-    _, found = sandbox._sandbox.execute(check_cmd)
-    command = f"python -m {module} {args}".strip()
-    if found != 0:
-        return {"available": False, "command": command, "cwd": cwd, "reason": "python module not installed"}
-    return _optional_command(
-        sandbox,
-        command,
-        cwd=cwd,
-        timeout_hint=timeout_hint,
-        max_output=max_output,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def _discover_project_files(sandbox: AgentDockerSandbox, target: str) -> dict:
-    code = r'''
-import json
-from pathlib import Path
-
-project_root = Path("PROJECT_ROOT_PLACEHOLDER")
-target = Path("TARGET_PLACEHOLDER")
-test_names = {"tests", "test", "__tests__"}
-dependency_names = {
-    "pyproject.toml",
-    "requirements.txt",
-    "requirements-dev.txt",
-    "poetry.lock",
-    "uv.lock",
-    "Pipfile",
-    "Pipfile.lock",
-}
-result = {
-    "project_root": str(project_root),
-    "target": str(target),
-    "target_exists": target.exists(),
-    "python_files": [],
-    "test_files": [],
-    "test_support_files": [],
-    "dependency_files": [],
-    "readme_files": [],
-}
-if target.exists():
-    result["python_files"] = [str(path) for path in sorted(target.rglob("*.py"))]
-if project_root.exists():
-    result["test_files"] = [
-        str(path)
-        for path in sorted(project_root.rglob("*.py"))
-        if path.name.startswith("test_")
-        or path.name.endswith("_test.py")
-    ]
-    result["test_support_files"] = [
-        str(path)
-        for path in sorted(project_root.rglob("*.py"))
-        if any(part in test_names for part in path.parts)
-        and not (path.name.startswith("test_") or path.name.endswith("_test.py"))
-    ]
-    result["dependency_files"] = [
-        str(path)
-        for path in sorted(project_root.rglob("*"))
-        if path.is_file() and path.name in dependency_names
-    ]
-    result["readme_files"] = [
-        str(path)
-        for path in sorted(project_root.rglob("*"))
-        if path.is_file() and path.name.lower().startswith("readme")
-    ]
-print(json.dumps(result, ensure_ascii=False))
-'''.replace("PROJECT_ROOT_PLACEHOLDER", SANDBOX_PROJECT_ROOT).replace("TARGET_PLACEHOLDER", target)
-    return _run_sandbox_json(sandbox, code)
-
-
-def _coverage_json_result(sandbox: AgentDockerSandbox) -> dict:
-    raw = _run_sandbox_json(
-        sandbox,
-        r'''
-import json
-from pathlib import Path
-
-path = Path(".coverage.json")
-if not path.exists():
-    print(json.dumps({"ok": False, "reason": ".coverage.json was not generated"}, ensure_ascii=False))
-else:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    totals = data.get("totals", {})
-    files = data.get("files", {})
-    print(json.dumps(
-        {
-            "ok": True,
-            "totals": totals,
-            "file_count": len(files),
-            "lowest_coverage_files": sorted(
-                [
-                    {
-                        "file": name,
-                        "percent_covered": details.get("summary", {}).get("percent_covered"),
-                        "missing_lines": details.get("summary", {}).get("missing_lines"),
-                    }
-                    for name, details in files.items()
-                ],
-                key=lambda item: item["percent_covered"] if item["percent_covered"] is not None else 101,
-            )[:10],
-        },
-        ensure_ascii=False,
-    ))
-''',
-    )
-    return raw
-
-
-def _read_sandbox_json_file(sandbox: AgentDockerSandbox, file_path: str) -> dict:
-    return _run_sandbox_json(
-        sandbox,
-        f'''
-import json
-from pathlib import Path
-
-path = Path({file_path!r})
-if not path.exists():
-    print(json.dumps({{"ok": False, "reason": f"{{path}} was not generated"}}, ensure_ascii=False))
-else:
-    try:
-        print(json.dumps({{"ok": True, "data": json.loads(path.read_text(encoding="utf-8"))}}, ensure_ascii=False))
-    except Exception as exc:
-        print(json.dumps({{"ok": False, "reason": str(exc)}}, ensure_ascii=False))
-''',
-    )
-
-
-def _skipped_command(command: str, reason: str) -> dict:
-    return {
-        "available": False,
-        "command": command,
-        "skipped": True,
-        "reason": reason,
-    }
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -1097,7 +885,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
 输出：只写入 Markdown 草稿 {ws}/drafts/architect.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health/code-architect")),
+            "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.architect", model, backend),
         },
         {
@@ -1109,7 +897,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输入：先读取 {ws}/raw/tool_results.json，必要时读取目标源码。
 输出：只写入 Markdown 草稿 {ws}/drafts/security.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health/code-security")),
+            "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.security-analyst", model, backend),
         },
         {
@@ -1122,7 +910,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 联网：默认不要联网；只有 skill 允许且确有必要时最多调用 1 次 internet_search，save_path={ws}/raw/web_search/dependency-advisories.json。
 输出：只写入 Markdown 草稿 {ws}/drafts/dependencies.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health/code-dependency")),
+            "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.dependency-checker", model, backend),
         },
         {
@@ -1134,7 +922,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输入：先读取 {ws}/raw/tool_results.json，必要时读取 README 和目标源码。
 输出：只写入 Markdown 草稿 {ws}/drafts/documentation.md，不要写 JSON/HTML 或别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("code-health/code-documentation")),
+            "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.doc-reviewer", model, backend),
         },
         {
@@ -1147,7 +935,7 @@ def _code_health_subagents(ws: str, target: str, metrics: Metrics, model, backen
 输出：只写入 Markdown 最终报告 {ws}/code_health_report.md。
 禁止：不要写 HTML/JSON/可视化网页、{ws}/drafts/merged-report.md、/outputs/code_health_report.md 或任何别名文件；不要用 execute 读写 /outputs/ 或做写后验证。
 完成写入后立即停止。""",
-            "skills": _agent_skills(_skill_dir("code-health/report-writing")),
+            "skills": _agent_skills(_skill_dir("code-health")),
             "middleware": _agent_middleware(metrics, "root.code-health-orchestrator.summarizer", model, backend),
         },
     ]
@@ -1164,7 +952,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：最多调用 1 次 internet_search，save_path={ws}/raw/web_search/product-strategy.json。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_strategy.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review/review-ops")),
+            "skills": _agent_skills(_skill_dir("prd-review")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.product-strategist", model, backend),
         },
         {
@@ -1175,7 +963,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_tech.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review/review-tech")),
+            "skills": _agent_skills(_skill_dir("prd-review")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.technical-feasibility", model, backend),
         },
         {
@@ -1186,7 +974,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_ux.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review/review-ux")),
+            "skills": _agent_skills(_skill_dir("prd-review")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.ux-researcher", model, backend),
         },
         {
@@ -1197,7 +985,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 联网：不要调用 internet_search。
 输出：只写入 Markdown 草稿 {ws}/drafts/review_risk.md，不要写别名文件。
 完成写入后输出中文摘要并停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review/review-risk")),
+            "skills": _agent_skills(_skill_dir("prd-review")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.risk-analyst", model, backend),
         },
         {
@@ -1208,7 +996,7 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 输出：分别写入 {ws}/prd_v2_final.md 和 {ws}/review_matrix.md。
 禁止：不要接受别名草稿，不要写 final_report.md、merged 文件或 /outputs/*.md；不要用 execute 读写 /outputs/ 或做写后验证。
 完成两个文件写入后立即停止。""",
-            "skills": _agent_skills(_skill_dir("prd-review/report-writing"), _skill_dir("prd-review/review-matrix")),
+            "skills": _agent_skills(_skill_dir("prd-review")),
             "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator.editor", model, backend),
         },
     ]
@@ -1220,7 +1008,6 @@ def _prd_review_subagents(ws: str, metrics: Metrics, model, backend) -> list:
 
 def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    code_health_check_cache: dict[str, str] = {}
     prd_review_search_counts: dict[str, int] = {}
 
     # ---- LangSmith ----
@@ -1263,7 +1050,7 @@ def main():
     store = InMemoryStore()
     sandbox: AgentDockerSandbox | None = None
     try:
-        sandbox = AgentDockerSandbox(target_project_path)
+        sandbox = AgentDockerSandbox(target_project_path, SKILLS_DIR, run_root)
     except Exception as exc:
         print(f"ERROR: Docker sandbox unavailable: {exc}")
         print("Run Docker Desktop, then rerun this demo in the llm-dev environment.")
@@ -1293,247 +1080,6 @@ def main():
             mode="deny",
         ),
     ]
-
-    @tool
-    def run_code_health_checks(target: str = SANDBOX_TARGET_CODE) -> str:
-        """Host-side wrapper that runs code-health commands inside Docker and saves JSON results.
-
-        This tool function itself executes in the local Python process. Only the
-        ruff/mypy/bandit/pip-audit/pytest/coverage/deptry/interrogate/radon/
-        detect-secrets commands it launches run inside the Docker sandbox.
-        """
-        target_rel = _relative_sandbox_path(target)
-        if target_rel in code_health_check_cache:
-            return code_health_check_cache[target_rel]
-
-        discovery = _discover_project_files(sandbox, target)
-        dependency_files = discovery.get("dependency_files", [])
-        test_files = discovery.get("test_files", [])
-
-        if INSTALL_PROJECT_DEPS:
-            dependency_install = _optional_command(
-                sandbox,
-                "python -m pip install --disable-pip-version-check -e .",
-                max_output=20000,
-                timeout_seconds=180,
-            )
-        else:
-            dependency_install = _skipped_command(
-                "python -m pip install --disable-pip-version-check -e .",
-                "disabled by default; set APERIO_INSTALL_PROJECT_DEPS=1 to install project dependencies inside the disposable container",
-            )
-        project_deps_ready = dependency_install.get("exit_code") == 0
-
-        if not project_deps_ready:
-            pip_audit = _skipped_command(
-                "pip-audit . --format json --progress-spinner off",
-                "project dependencies are not installed; skipped to avoid slow or incomplete dependency audit",
-            )
-        elif dependency_files:
-            pip_audit = _optional_command(
-                sandbox,
-                "pip-audit . --format json --progress-spinner off",
-                max_output=30000,
-                timeout_seconds=90,
-            )
-        else:
-            pip_audit = _skipped_command(
-                "pip-audit . --format json --progress-spinner off",
-                "no dependency manifest found under the sandbox project root",
-            )
-
-        if not project_deps_ready:
-            pytest_result = _skipped_command(
-                "python -m pytest --maxfail=20 --disable-warnings -q",
-                "project dependencies are not installed; skipped because pytest would fail during import collection",
-            )
-            coverage_result = _skipped_command(
-                "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
-                "project dependencies are not installed; skipped because coverage depends on pytest execution",
-            )
-        elif test_files:
-            pytest_result = _optional_python_module(
-                sandbox,
-                "pytest",
-                "--maxfail=20 --disable-warnings -q",
-                max_output=30000,
-                timeout_seconds=120,
-            )
-            if pytest_result.get("available") and pytest_result.get("exit_code") in (0, 1):
-                coverage_run = _optional_python_module(
-                    sandbox,
-                    "coverage",
-                    "run -m pytest --maxfail=20 --disable-warnings -q",
-                    max_output=30000,
-                    timeout_seconds=180,
-                )
-                if coverage_run.get("available"):
-                    coverage_json = _optional_python_module(
-                        sandbox,
-                        "coverage",
-                        "json -o .coverage.json",
-                        max_output=12000,
-                        timeout_seconds=60,
-                    )
-                    coverage_result = {
-                        "available": coverage_run.get("available", False),
-                        "command": "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q && python -m coverage json -o .coverage.json",
-                        "cwd": SANDBOX_PROJECT_ROOT,
-                        "run": coverage_run,
-                        "json_export": coverage_json,
-                        "summary": _coverage_json_result(sandbox),
-                        "note": "Coverage reflects the discovered pytest suite only; import failures or missing project dependencies can make it incomplete.",
-                    }
-                else:
-                    coverage_result = coverage_run
-            else:
-                coverage_result = _skipped_command(
-                    "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
-                    "pytest was unavailable or failed before coverage could be collected",
-                )
-        else:
-            pytest_result = _skipped_command(
-                "python -m pytest --maxfail=20 --disable-warnings -q",
-                "no pytest test files discovered under the sandbox project root",
-            )
-            coverage_result = _skipped_command(
-                "python -m coverage run -m pytest --maxfail=20 --disable-warnings -q",
-                "no pytest test files discovered under the sandbox project root",
-            )
-
-        deptry_result = _optional_command(
-            sandbox,
-            "deptry . --json-output .deptry.json",
-            max_output=30000,
-            timeout_seconds=90,
-        )
-        if deptry_result.get("available"):
-            deptry_result["json_file"] = _read_sandbox_json_file(sandbox, ".deptry.json")
-
-        interrogate_result = _optional_command(
-            sandbox,
-            f"interrogate --fail-under=0 --verbose {shlex.quote(target_rel)}",
-            max_output=20000,
-            timeout_seconds=60,
-        )
-
-        radon_cc = _optional_command(
-            sandbox,
-            f"radon cc {shlex.quote(target_rel)} --json --show-complexity",
-            max_output=30000,
-            timeout_seconds=60,
-        )
-        if radon_cc.get("available"):
-            radon_result = {
-                "available": True,
-                "cwd": SANDBOX_PROJECT_ROOT,
-                "cc": radon_cc,
-                "mi": _optional_command(
-                    sandbox,
-                    f"radon mi {shlex.quote(target_rel)} --json --show",
-                    max_output=30000,
-                    timeout_seconds=60,
-                ),
-                "raw": _optional_command(
-                    sandbox,
-                    f"radon raw {shlex.quote(target_rel)} --json --summary",
-                    max_output=30000,
-                    timeout_seconds=60,
-                ),
-                "note": "radon is dependency-free AST/static metric analysis for complexity and maintainability.",
-            }
-        else:
-            radon_result = radon_cc
-
-        detect_secrets_result = _optional_command(
-            sandbox,
-            (
-                "detect-secrets scan --all-files "
-                "--exclude-files "
-                + shlex.quote(r"(^|/)(\.mypy_cache|\.pytest_cache|\.ruff_cache|__pycache__)/|(^|/)(\.coverage\.json|\.deptry\.json|\.secrets\.baseline)$")
-                + " ."
-            ),
-            max_output=50000,
-            timeout_seconds=60,
-        )
-
-        tool_results = {
-            "schema_version": "code-health-tools-v4",
-            "project_root": SANDBOX_PROJECT_ROOT,
-            "target": target,
-            "target_rel": target_rel,
-            "coverage_notes": {
-                "mypy_mode": "lightweight_ignore_missing_imports",
-                "mypy_limitation": (
-                    "Project dependencies are not installed by default, so mypy runs with "
-                    "--ignore-missing-imports. Treat mypy findings as partial type-check "
-                    "coverage, not a full CI-equivalent type check."
-                ),
-                "dependency_install_default": "disabled",
-                "dependency_install_enable": "set APERIO_INSTALL_PROJECT_DEPS=1",
-                "dependency_required_tools": ["pip_audit", "pytest", "coverage"],
-                "pytest_coverage_limitation": (
-                    "pytest and coverage use the discovered project test suite. If project "
-                    "dependencies are not installed, import failures can make test and coverage "
-                    "results incomplete."
-                ),
-                "deptry_limitation": (
-                    "deptry can read dependency declarations from project manifests, but "
-                    "transitive dependency analysis can be incomplete when project dependencies "
-                    "are not installed in the disposable container."
-                ),
-            },
-            "discovery": discovery,
-            "setup": {
-                "dependency_install": dependency_install,
-            },
-            "tools": {
-                "ruff": _optional_command(
-                    sandbox,
-                    f"ruff check {shlex.quote(target_rel)} --output-format json --no-cache",
-                ),
-                "mypy": _optional_command(
-                    sandbox,
-                    f"mypy {shlex.quote(target_rel)} --hide-error-context --no-error-summary --no-incremental --ignore-missing-imports",
-                ),
-                "bandit": _optional_command(
-                    sandbox,
-                    f"bandit -r {shlex.quote(target_rel)} -f json -q",
-                    max_output=30000,
-                ),
-                "pip_audit": pip_audit,
-                "pytest": pytest_result,
-                "coverage": coverage_result,
-                "deptry": deptry_result,
-                "interrogate": interrogate_result,
-                "radon": radon_result,
-                "detect_secrets": detect_secrets_result,
-            },
-        }
-        output_path = run_root / "code_health" / "raw" / "tool_results.json"
-        _write_json(output_path, tool_results)
-        summary = {
-            "saved_to": "/outputs/code_health/raw/tool_results.json",
-            "schema_version": tool_results["schema_version"],
-            "project_root": SANDBOX_PROJECT_ROOT,
-            "target": target,
-            "mypy_mode": tool_results["coverage_notes"]["mypy_mode"],
-            "python_files": len(discovery.get("python_files", [])),
-            "test_files": len(test_files),
-            "dependency_files": dependency_files,
-            "dependency_install_exit_code": dependency_install.get("exit_code"),
-            "tools_available": {
-                name: data.get("available", False)
-                for name, data in tool_results["tools"].items()
-            },
-            "tool_exit_codes": {
-                name: data.get("exit_code")
-                for name, data in tool_results["tools"].items()
-            },
-        }
-        summary_json = json.dumps(summary, ensure_ascii=False)
-        code_health_check_cache[target_rel] = summary_json
-        return summary_json
 
     @tool
     def internet_search(query: str, max_results: int = 3, save_path: str = "") -> str:
@@ -1716,7 +1262,7 @@ def main():
         ModelFallbackMiddleware(fallback_model),
         *root_observability,
         ToolRetryMiddleware(
-            tools=["ls", "glob", "grep", "read_file", "run_code_health_checks", "internet_search"],
+            tools=["ls", "glob", "grep", "read_file", "internet_search"],
             max_retries=2,
             initial_delay=0.5,
             max_delay=2.0,
@@ -1727,7 +1273,7 @@ def main():
             exit_behavior="continue",
         ),
     ]
-    custom_tools = [run_code_health_checks, internet_search]
+    custom_tools = [internet_search]
     root_interrupt_on = {
         "execute": {"allowed_decisions": ["approve", "reject"]},
         "write_file": {"allowed_decisions": ["approve", "reject"]},
@@ -1736,12 +1282,14 @@ def main():
     code_health_orchestrator = {
         "name": "code-health-orchestrator",
         "description": "Orchestrate a code health scan: spawn 4 parallel analysis sub-agents then merge results",
-        "skills": _agent_skills(),
+        "skills": _agent_skills(_skill_dir("code-health")),
         "middleware": _agent_middleware(metrics, "root.code-health-orchestrator", model, backend),
         "system_prompt": f"""你是代码健康检查编排器（Code Health Orchestrator）。工作流程：
 
 1. 使用 write_todos 规划任务
-2. 调用 run_code_health_checks 工具扫描 {SANDBOX_TARGET_CODE}，工具结果会写入 {code_ws}/raw/tool_results.json
+2. 按 code-health-toolkit skill 使用 execute 运行脚本：
+   `python /skills/code-health/code-health-toolkit/scripts/run_checks.py --project-root {SANDBOX_PROJECT_ROOT} --target app/core --out {code_ws}/raw/tool_results.json --summary`
+   这是唯一允许的代码体检扫描命令；不要手写 ruff/mypy/bandit/radon/detect-secrets 等单独命令替代它
 3. 可先读取 /local-resources/aperio_policy.yaml 了解安全和存储策略
 4. 必须使用 task 工具并行派发 4 个已声明子代理分析 {SANDBOX_TARGET_CODE}，并要求它们优先引用 {code_ws}/raw/tool_results.json 中的事实：
    - architect：架构分析
@@ -1769,7 +1317,7 @@ def main():
     prd_review_orchestrator = {
         "name": "prd-review-orchestrator",
         "description": "Orchestrate PRD review: write a PRD, spawn 4 parallel reviewers, then editor merges feedback",
-        "skills": _agent_skills(_skill_dir("prd-review/prd-writing")),
+        "skills": _agent_skills(_skill_dir("prd-review")),
         "middleware": _agent_middleware(metrics, "root.prd-review-orchestrator", model, backend),
         "system_prompt": f"""你是 PRD 评审编排器（PRD Review Orchestrator）。工作流程：
 
@@ -1880,29 +1428,29 @@ PRD 使用中文撰写。""",
     t_code = time.time() - t0
 
     # ---- Run: PRD Review ----
-    print(f"\n{'─' * 60}")
-    print("Task 2: PRD Review")
-    print(f"{'─' * 60}")
+    # print(f"\n{'─' * 60}")
+    # print("Task 2: PRD Review")
+    # print(f"{'─' * 60}")
 
-    t1 = time.time()
-    prd_config = {"configurable": {"thread_id": f"{run_id}:prd-review"}}
-    resp = agent.invoke(
-        {
-            "messages": [{
-                "role": "user",
-                "content": (
-                    "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
-                    "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
-                    "同时提供校园活动推荐和实时拥挤度信息。"
-                    "请使用 prd-review-orchestrator 执行全流程，并写入标准 PRD v2 和评审矩阵。"
-                ),
-            }],
-        },
-        config=prd_config,
-        version="v2",
-    )
-    resp = handle_human_approval(agent, resp, prd_config, "prd-review")
-    t_prd = time.time() - t1
+    # t1 = time.time()
+    # prd_config = {"configurable": {"thread_id": f"{run_id}:prd-review"}}
+    # resp = agent.invoke(
+    #     {
+    #         "messages": [{
+    #             "role": "user",
+    #             "content": (
+    #                 "我需要为「智慧校园导航助手」写一份 PRD 并评审。"
+    #                 "这是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，"
+    #                 "同时提供校园活动推荐和实时拥挤度信息。"
+    #                 "请使用 prd-review-orchestrator 执行全流程，并写入标准 PRD v2 和评审矩阵。"
+    #             ),
+    #         }],
+    #     },
+    #     config=prd_config,
+    #     version="v2",
+    # )
+    # resp = handle_human_approval(agent, resp, prd_config, "prd-review")
+    # t_prd = time.time() - t1
 
     # ---- Output ----
     print(f"\n{'=' * 60}")
@@ -1911,8 +1459,8 @@ PRD 使用中文撰写。""",
     m = metrics.to_dict()
     print(f"📊 Performance:")
     print(f"   Code Health:   {t_code:.1f}s")
-    print(f"   PRD Review:    {t_prd:.1f}s")
-    print(f"   Total wall:    {t_code + t_prd:.1f}s")
+    # print(f"   PRD Review:    {t_prd:.1f}s")
+    # print(f"   Total wall:    {t_code + t_prd:.1f}s")
     print(f"   Model calls:   {m['model_calls']} (avg {m['model_avg_ms']}ms)")
     print(f"   Tool calls:    {m['tool_calls']} (avg {m['tool_avg_ms']}ms)")
     print(f"   Total tokens:  {m['total_tokens']}")

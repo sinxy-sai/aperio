@@ -1,12 +1,6 @@
 ---
 name: review-ops
 description: Use when reviewing PRD from business and operations perspective — value alignment, launch strategy, risk assessment, success metrics, competitive analysis, and stakeholder impact
-triggers:
-  - 运营评审
-  - 商业评审
-  - 上线策略
-  - 风险评估
-  - 竞品分析
 ---
 
 ## 角色定义

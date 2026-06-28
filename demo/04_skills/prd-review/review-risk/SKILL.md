@@ -1,12 +1,6 @@
 ---
 name: review-risk
 description: Use when reviewing PRD from project risk perspective — timeline, staffing, privacy, compliance, adoption barriers, launch risk, operational fallback, and unresolved assumptions.
-triggers:
-  - 风险评审
-  - 项目风险
-  - 合规风险
-  - 上线风险
-  - 采纳障碍
 ---
 
 ## 角色定义

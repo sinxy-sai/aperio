@@ -1,12 +1,6 @@
 ---
 name: code-architect
 description: Use when analyzing codebase architecture — directory structure, module coupling, layering clarity, naming conventions, and anti-patterns like God Classes or circular dependencies
-triggers:
-  - 架构分析
-  - 代码结构
-  - 模块耦合
-  - 循环依赖
-  - 分层评估
 ---
 
 ## 角色定义

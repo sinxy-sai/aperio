@@ -1,12 +1,6 @@
 ---
 name: web-search
 description: Use when an Aperio agent needs public web evidence through the internet_search tool, including competitor research, market context, dependency ecosystem checks, official advisories, and rules for saving search evidence without polluting long-term memory.
-triggers:
-  - 联网搜索
-  - 公开资料
-  - 竞品调研
-  - 官方公告
-  - web evidence
 ---
 
 ## 角色定位

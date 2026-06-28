@@ -1,12 +1,6 @@
 ---
 name: review-tech
 description: Use when reviewing PRD from technical feasibility perspective — architecture impact, API design, security concerns, performance expectations, and dependency assessment
-triggers:
-  - 技术评审
-  - 技术可行性
-  - 架构评审
-  - API 设计
-  - 安全审查
 ---
 
 ## 角色定义

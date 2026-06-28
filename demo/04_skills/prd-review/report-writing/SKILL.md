@@ -1,12 +1,6 @@
 ---
 name: report-writing
 description: Use when editing PRD review outputs into Aperio PRD v2 documents, especially when merging product, technical, UX, and risk feedback into final Chinese Markdown files.
-triggers:
-  - PRD 终稿
-  - PRD v2
-  - 产品需求文档
-  - 合并评审意见
-  - PRD 编辑
 ---
 
 ## 角色定义

@@ -1,12 +1,6 @@
 ---
 name: prd-writing
 description: Use when drafting Aperio PRD v1 from a user request and limited public web evidence before multi-role PRD review; covers Chinese PRD structure, evidence boundaries, scope definition, user stories, success metrics, non-functional requirements, and output contract.
-triggers:
-  - PRD 初稿
-  - PRD v1
-  - 写 PRD
-  - 产品需求文档
-  - 需求初稿
 ---
 
 ## 角色定义

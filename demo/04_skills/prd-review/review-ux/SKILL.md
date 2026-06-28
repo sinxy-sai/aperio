@@ -1,12 +1,6 @@
 ---
 name: review-ux
 description: Use when reviewing PRD from user experience perspective — user flow, edge cases, interaction consistency, accessibility, and information architecture
-triggers:
-  - UX 评审
-  - 用户体验
-  - 交互设计
-  - 可用性
-  - 无障碍
 ---
 
 ## 角色定义

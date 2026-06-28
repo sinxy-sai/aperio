@@ -1,12 +1,6 @@
 ---
 name: review-matrix
 description: Use when consolidating PRD reviewer feedback into a standardized Aperio review matrix with dimensions, severity, acceptance status, and final handling notes.
-triggers:
-  - 评审矩阵
-  - 合并评审
-  - 生成矩阵
-  - 汇总意见
-  - 多角色反馈整合
 ---
 
 ## 角色定义
