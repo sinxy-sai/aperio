@@ -52,3 +52,9 @@ demo/.env
 # Demo outputs (track code, not generated files)
 demo/*/workspace_*/
 demo/workspace_*/
+
+.agents/
+
+full-stack-fastapi-template-master/
+
+docs/
