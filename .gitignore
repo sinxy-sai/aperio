@@ -58,3 +58,5 @@ demo/workspace_*/
 full-stack-fastapi-template-master/
 
 docs/
+
+.vscode/
