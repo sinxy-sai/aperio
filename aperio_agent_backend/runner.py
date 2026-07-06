@@ -29,6 +29,7 @@ KNOWN_ARTIFACTS = (
     "outputs/prd_review/prd_v2_final.md",
     "outputs/prd_review/review_matrix.md",
     "outputs/code_health/raw/tool_results.json",
+    "observability.json",
     "performance.json",
     # Backward-compatible paths from the first backend prototype.
     "code_health/code_health_report.md",
@@ -411,6 +412,16 @@ def _write_performance(run_root: Path, started: float, route: str, ok: bool, err
         "engine": get_engine_name(),
         "model": get_model_name(),
     }
+    observability_path = run_root / "observability.json"
+    if observability_path.exists():
+        try:
+            observability = json.loads(observability_path.read_text(encoding="utf-8"))
+            payload["model_calls"] = observability.get("model_calls", 0)
+            payload["tool_calls"] = observability.get("tool_calls", 0)
+            payload["total_tokens"] = observability.get("total_tokens", 0)
+            payload["observability"] = observability
+        except json.JSONDecodeError:
+            payload["observability_error"] = "observability.json is not valid JSON"
     if error:
         payload["error"] = error
     _write_text(run_root / "performance.json", json.dumps(payload, ensure_ascii=False, indent=2))

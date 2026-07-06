@@ -135,6 +135,11 @@ h1 {
   font-weight: 700;
 }
 
+.nav-link {
+  margin-top: 10px;
+  text-decoration: none;
+}
+
 .nav-section {
   display: grid;
   gap: 8px;
@@ -173,6 +178,38 @@ h1 {
   padding: 9px 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.recent-sessions:not(:empty) ~ span {
+  display: none;
+}
+
+.recent-session {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  border-radius: 10px;
+  color: var(--ink);
+  background: transparent;
+  padding: 9px 8px;
+  text-align: left;
+}
+
+.recent-session:hover,
+.recent-session.active {
+  background: #fff;
+}
+
+.recent-session strong,
+.recent-session small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-session small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .workspace {
@@ -468,7 +505,7 @@ textarea {
   height: 100%;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   border-left: 1px solid var(--line);
   background: #fbfbfc;
@@ -512,6 +549,164 @@ textarea {
   max-height: none;
   overflow: auto;
   padding: 16px;
+}
+
+.panel-tabs {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #f6f7f9;
+}
+
+#observeTab,
+#observePage {
+  display: none !important;
+}
+
+.panel-tab {
+  height: 34px;
+  border-radius: 10px;
+  color: #5d6572;
+  background: transparent;
+  font-weight: 800;
+}
+
+.panel-tab.active {
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 8px 22px rgba(30, 40, 52, 0.07);
+}
+
+.panel-page {
+  display: none;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-page.active {
+  display: grid;
+}
+
+.observe-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 14px;
+}
+
+.metric {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px;
+}
+
+.metric.wide {
+  grid-column: 1 / -1;
+}
+
+.metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.metric strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 5px;
+  font-size: 19px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.observe-layout {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(120px, 34%) minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  padding: 0 14px 14px;
+}
+
+.run-list,
+.event-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.run-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px;
+  text-align: left;
+}
+
+.run-item.active {
+  border-color: rgba(24, 119, 84, 0.35);
+  box-shadow: 0 0 0 3px rgba(24, 119, 84, 0.08);
+}
+
+.run-item strong,
+.run-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-route {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.run-item > span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.event-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px;
+}
+
+.event-row strong,
+.event-row span {
+  display: block;
+  overflow: hidden;
+  max-width: 230px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.event-row em {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
 }
 
 .artifact-card {

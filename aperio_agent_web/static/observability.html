@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aperio Observability</title>
+    <link rel="stylesheet" href="/static/observability.css" />
+  </head>
+  <body>
+    <main class="observe-shell">
+      <aside class="observe-rail" aria-label="运行列表">
+        <div class="rail-head">
+          <div class="brand-line">
+            <span class="brand-mark">A</span>
+            <div>
+              <h1>Aperio</h1>
+              <p>Observability</p>
+            </div>
+          </div>
+          <a class="ghost-link" href="/">返回聊天</a>
+        </div>
+
+        <div class="rail-tools">
+          <button id="refreshBtn" type="button">刷新</button>
+          <select id="routeFilter" aria-label="筛选运行类型">
+            <option value="">全部类型</option>
+            <option value="general">general</option>
+            <option value="code_health">code_health</option>
+            <option value="prd">prd</option>
+            <option value="error">error</option>
+          </select>
+        </div>
+
+        <div class="run-feed" id="runFeed">
+          <div class="empty-state">正在读取运行记录...</div>
+        </div>
+      </aside>
+
+      <section class="observe-main" aria-label="运行观测详情">
+        <header class="observe-topbar">
+          <div>
+            <p class="eyebrow">Agent Trace</p>
+            <h2 id="pageTitle">选择一次运行</h2>
+          </div>
+          <div class="health-strip" id="healthStrip">
+            <span class="dot warn"></span>
+            <span>连接中</span>
+          </div>
+        </header>
+
+        <section class="metric-grid" id="metricGrid" aria-label="运行指标">
+          <div class="metric"><span>模型调用</span><strong>0</strong></div>
+          <div class="metric"><span>工具调用</span><strong>0</strong></div>
+          <div class="metric"><span>总 Token</span><strong>0</strong></div>
+          <div class="metric"><span>耗时</span><strong>0.0s</strong></div>
+        </section>
+
+        <section class="detail-grid">
+          <div class="surface agents-surface">
+            <div class="surface-head">
+              <h3>Agent 分布</h3>
+              <span id="agentCount">0 agents</span>
+            </div>
+            <div class="agent-grid" id="agentGrid">
+              <div class="empty-state">暂无 Agent 调用数据。</div>
+            </div>
+          </div>
+
+          <div class="surface timeline-surface">
+            <div class="surface-head">
+              <h3>事件时间线</h3>
+              <span id="eventCount">0 events</span>
+            </div>
+            <div class="timeline" id="timeline">
+              <div class="empty-state">暂无模型或工具事件。</div>
+            </div>
+          </div>
+
+          <div class="surface files-surface">
+            <div class="surface-head">
+              <h3>产物与文件</h3>
+              <span id="fileCount">0 files</span>
+            </div>
+            <div class="file-list" id="fileList">
+              <div class="empty-state">选择运行后查看落盘文件。</div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/observability.js"></script>
+  </body>
+</html>

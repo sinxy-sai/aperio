@@ -22,6 +22,11 @@
           <span>新对话</span>
         </button>
 
+        <a class="nav-primary nav-link" href="/observability">
+          <span class="nav-icon" aria-hidden="true">◎</span>
+          <span>观测平台</span>
+        </a>
+
         <div class="nav-section">
           <p>快捷任务</p>
           <button data-example="我在珠海，明天天气如何？要带伞吗？">
@@ -39,6 +44,7 @@
         </div>
 
         <div class="nav-section muted-list">
+          <div id="recentSessions" class="recent-sessions"></div>
           <p>最近</p>
           <span>智慧校园 PRD</span>
           <span>代码健康检查</span>
@@ -118,18 +124,42 @@
       <aside class="artifacts" id="artifactPanel" aria-label="Artifacts">
         <div class="artifact-head">
           <div>
-            <p class="eyebrow">Outputs</p>
-            <h2>产物</h2>
+            <p class="eyebrow">Trace Console</p>
+            <h2>运行台</h2>
           </div>
           <div class="artifact-actions">
             <span id="runId">未运行</span>
+            <button class="icon-button" id="observeRefresh" type="button" aria-label="刷新观测">
+              <span aria-hidden="true">↻</span>
+            </button>
             <button class="icon-button" id="artifactClose" type="button" aria-label="收起产物面板">
               <span aria-hidden="true">›</span>
             </button>
           </div>
         </div>
-        <div id="artifactList" class="artifact-list">
-          <div class="empty-state">完成一次任务后，这里会显示 Markdown 报告和性能文件。</div>
+        <div class="panel-tabs" role="tablist" aria-label="运行台视图">
+          <button class="panel-tab active" id="artifactTab" type="button">产物</button>
+          <button class="panel-tab" id="observeTab" type="button">观测</button>
+        </div>
+        <div class="panel-page active" id="artifactPage">
+          <div id="artifactList" class="artifact-list">
+            <div class="empty-state">完成一次任务后，这里会显示 Markdown 报告和性能文件。</div>
+          </div>
+        </div>
+        <div class="panel-page" id="observePage">
+          <div class="observe-summary" id="observeSummary">
+            <div class="metric"><span>模型</span><strong>0</strong></div>
+            <div class="metric"><span>工具</span><strong>0</strong></div>
+            <div class="metric"><span>Token</span><strong>0</strong></div>
+          </div>
+          <div class="observe-layout">
+            <div class="run-list" id="runList">
+              <div class="empty-state">暂无运行记录。</div>
+            </div>
+            <div class="event-list" id="eventList">
+              <div class="empty-state">选择一次运行查看模型、工具和事件。</div>
+            </div>
+          </div>
         </div>
       </aside>
     </main>
