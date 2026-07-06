@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,47 @@ def runs(limit: int = 30) -> dict[str, Any]:
     return {"runs": items}
 
 
+@app.get("/api/observability/summary")
+def observability_summary(days: int = 7) -> dict[str, Any]:
+    days = max(0, min(days, 3650))
+    summaries = _run_summaries()
+    if days:
+        cutoff = datetime.now() - timedelta(days=days)
+        summaries = [item for item in summaries if not item["createdAtDate"] or item["createdAtDate"] >= cutoff]
+
+    latencies = sorted(
+        float(item["durationSeconds"])
+        for item in summaries
+        if isinstance(item.get("durationSeconds"), (int, float))
+    )
+    failed = [item for item in summaries if _is_failed_run(item)]
+    route_counts: dict[str, int] = {}
+    for item in summaries:
+        route = str(item.get("route") or "unknown")
+        route_counts[route] = route_counts.get(route, 0) + 1
+
+    total_runs = len(summaries)
+    latest = summaries[0] if summaries else {}
+    return {
+        "windowDays": days,
+        "totalRuns": total_runs,
+        "successfulRuns": total_runs - len(failed),
+        "failedRuns": len(failed),
+        "errorRate": (len(failed) / total_runs) if total_runs else 0,
+        "p50LatencySeconds": _percentile(latencies, 50),
+        "p99LatencySeconds": _percentile(latencies, 99),
+        "avgLatencySeconds": (sum(latencies) / len(latencies)) if latencies else 0,
+        "totalTokens": sum(int(item.get("totalTokens") or 0) for item in summaries),
+        "totalModelCalls": sum(int(item.get("modelCalls") or 0) for item in summaries),
+        "totalToolCalls": sum(int(item.get("toolCalls") or 0) for item in summaries),
+        "routeCounts": route_counts,
+        "latestRunId": latest.get("runId", ""),
+        "latestRunRoute": latest.get("route", ""),
+        "latestRunDurationSeconds": latest.get("durationSeconds"),
+        "generatedAt": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 @app.get("/api/runs/{run_id}")
 def run_detail(run_id: str) -> dict[str, Any]:
     run_root = _safe_run_root(run_id)
@@ -215,3 +257,54 @@ def _list_run_files(run_root: Path) -> list[dict[str, Any]]:
                 }
             )
     return files[:300]
+
+
+def _run_summaries() -> list[dict[str, Any]]:
+    if not WORKSPACE_ROOT.exists():
+        return []
+    items = []
+    for run_root in sorted((item for item in WORKSPACE_ROOT.iterdir() if item.is_dir()), reverse=True):
+        performance = _read_json(run_root / "performance.json")
+        artifacts = read_artifacts(run_root)
+        created_at_date = _parse_run_datetime(run_root.name)
+        items.append(
+            {
+                "runId": run_root.name,
+                "ok": performance.get("ok"),
+                "route": performance.get("route", "unknown"),
+                "durationSeconds": performance.get("duration_seconds"),
+                "engine": performance.get("engine"),
+                "model": performance.get("model"),
+                "modelCalls": performance.get("model_calls", 0),
+                "toolCalls": performance.get("tool_calls", 0),
+                "totalTokens": performance.get("total_tokens", 0),
+                "artifactCount": len(artifacts),
+                "createdAt": run_root.name[:15],
+                "createdAtDate": created_at_date,
+                "error": performance.get("error", ""),
+            }
+        )
+    return items
+
+
+def _parse_run_datetime(run_id: str) -> datetime | None:
+    try:
+        return datetime.strptime(run_id[:15], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def _is_failed_run(item: dict[str, Any]) -> bool:
+    return item.get("ok") is False or item.get("route") == "error" or bool(item.get("error"))
+
+
+def _percentile(values: list[float], percentile: int) -> float:
+    if not values:
+        return 0
+    if len(values) == 1:
+        return values[0]
+    rank = (percentile / 100) * (len(values) - 1)
+    lower = int(rank)
+    upper = min(lower + 1, len(values) - 1)
+    weight = rank - lower
+    return values[lower] * (1 - weight) + values[upper] * weight

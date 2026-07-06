@@ -399,6 +399,8 @@ function ObservabilityPage({ navigate }) {
   const session = params.get("session") || "";
   const [health, setHealth] = useState(null);
   const [runs, setRuns] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [windowDays, setWindowDays] = useState(7);
   const [routeFilter, setRouteFilter] = useState("");
   const [selectedRunId, setSelectedRunId] = useState(initialRun);
   const [detail, setDetail] = useState(null);
@@ -406,8 +408,12 @@ function ObservabilityPage({ navigate }) {
 
   useEffect(() => {
     fetch("/api/health").then((response) => response.json()).then(setHealth).catch((error) => setHealth({ ok: false, error: error.message }));
-    loadRuns();
+    refreshObservability();
   }, []);
+
+  useEffect(() => {
+    loadSummary();
+  }, [windowDays]);
 
   useEffect(() => {
     if (selectedRunId) {
@@ -419,10 +425,18 @@ function ObservabilityPage({ navigate }) {
     }
   }, [selectedRunId]);
 
+  async function refreshObservability() {
+    await Promise.all([loadRuns(), loadSummary()]);
+  }
+
   async function loadRuns() {
     const data = await fetchJson("/api/runs?limit=100");
     setRuns(data.runs || []);
     if (!selectedRunId && data.runs?.[0]) setSelectedRunId(data.runs[0].runId);
+  }
+
+  async function loadSummary() {
+    setSummary(await fetchJson(`/api/observability/summary?days=${windowDays}`));
   }
 
   async function loadRunDetail(runId) {
@@ -430,6 +444,8 @@ function ObservabilityPage({ navigate }) {
   }
 
   const visibleRuns = routeFilter ? runs.filter((run) => run.route === routeFilter) : runs;
+  const routeSummary = Object.entries(summary?.routeCounts || {}).sort((a, b) => b[1] - a[1]);
+  const systemWindow = formatWindowLabel(summary?.windowDays ?? windowDays);
   const perf = detail?.performance || {};
   const obs = detail?.observability || perf.observability || {};
   const events = obs.events || [];
@@ -453,7 +469,7 @@ function ObservabilityPage({ navigate }) {
           <button className="ghost-link" type="button" onClick={backToChat}><ArrowLeft size={17} />返回聊天</button>
         </div>
         <div className="rail-tools">
-          <button type="button" onClick={loadRuns}><RefreshCw size={16} />刷新</button>
+          <button type="button" onClick={refreshObservability}><RefreshCw size={16} />刷新</button>
           <select value={routeFilter} onChange={(event) => setRouteFilter(event.target.value)}>
             <option value="">全部类型</option>
             <option value="general">general</option>
@@ -479,37 +495,102 @@ function ObservabilityPage({ navigate }) {
       <section className="observe-main">
         <header className="observe-topbar">
           <div>
-            <p className="eyebrow">Agent Trace</p>
-            <h2>{selectedRunId || "选择一次运行"}</h2>
+            <p className="eyebrow">Observability</p>
+            <h2>系统运行观测</h2>
           </div>
-          <div className="health-strip">
-            <span className={`dot ${health?.ok ? "" : "error"}`} />
-            <span>{health ? `${health.engine || "agent"} · ${health.model || "model"}` : "连接中"}</span>
+          <div className="observe-actions">
+            <select className="window-select" value={windowDays} onChange={(event) => setWindowDays(Number(event.target.value))}>
+              <option value={7}>近 7 天</option>
+              <option value={30}>近 30 天</option>
+              <option value={90}>近 90 天</option>
+              <option value={0}>全部</option>
+            </select>
+            <div className="health-strip">
+              <span className={`dot ${health?.ok ? "" : "error"}`} />
+              <span>{health ? `${health.engine || "agent"} · ${health.model || "model"}` : "连接中"}</span>
+            </div>
           </div>
         </header>
 
-        <section className="metric-grid">
-          <Metric label="模型调用" value={formatNumber(obs.model_calls || perf.model_calls)} />
-          <Metric label="工具调用" value={formatNumber(obs.tool_calls || perf.tool_calls)} />
-          <Metric label="总 Token" value={formatNumber(obs.total_tokens || perf.total_tokens)} />
-          <Metric label="耗时" value={formatSeconds(perf.duration_seconds)} />
-        </section>
+        <div className="observe-content">
+          <section className="metric-grid">
+            <Metric label={`Trace Count · ${systemWindow}`} value={formatNumber(summary?.totalRuns)} meta={`${formatNumber(summary?.successfulRuns)} success`} />
+            <Metric label={`Error Rate · ${systemWindow}`} value={formatPercent(summary?.errorRate)} meta={`${formatNumber(summary?.failedRuns)} failed`} tone={Number(summary?.errorRate || 0) > 0 ? "error" : "ok"} />
+            <Metric label={`P50 Latency · ${systemWindow}`} value={formatLatency(summary?.p50LatencySeconds)} meta={`avg ${formatLatency(summary?.avgLatencySeconds)}`} />
+            <Metric label={`P99 Latency · ${systemWindow}`} value={formatLatency(summary?.p99LatencySeconds)} meta="tail latency" />
+            <Metric label={`Total Tokens · ${systemWindow}`} value={formatNumber(summary?.totalTokens)} meta={`${formatNumber(summary?.totalModelCalls)} model calls`} />
+            <Metric label="Most Recent Run" value={summary?.latestRunId || "无"} meta={summary?.latestRunRoute || "not available"} />
+          </section>
 
-        <section className="detail-grid">
-          <div className="detail-stack">
-            <Surface title="Agent 分布" meta={`${agents.length} agents`} collapsed={collapsed.agents} onToggle={() => toggle("agents")} className="agents-surface">
-              {!agents.length ? <div className="empty-state">暂无 Agent 调用数据。</div> : agents.map(([name, counts]) => <AgentRow key={name} name={name} counts={counts} />)}
+          <section className="observe-overview">
+            <div className="route-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Traffic</p>
+                  <h3>路由分布</h3>
+                </div>
+                <span>{systemWindow}</span>
+              </div>
+              <div className="route-list">
+                {!routeSummary.length ? <div className="empty-state">暂无系统运行数据。</div> : routeSummary.map(([route, count]) => (
+                  <div className="route-row" key={route}>
+                    <div>
+                      <strong>{route}</strong>
+                      <span>{formatNumber(count)} runs</span>
+                    </div>
+                    <div className="route-meter">
+                      <span style={{ width: `${Math.max(4, (count / Math.max(1, summary?.totalRuns || 0)) * 100)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="runs-table-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Tracing</p>
+                  <h3>运行列表</h3>
+                </div>
+                <span>{visibleRuns.length} rows</span>
+              </div>
+              <div className="runs-table">
+                <div className="runs-table-head">
+                  <span>Name</span>
+                  <span>Route</span>
+                  <span>Status</span>
+                  <span>Latency</span>
+                  <span>Tokens</span>
+                </div>
+                {!visibleRuns.length ? <div className="empty-state">没有符合条件的运行记录。</div> : visibleRuns.slice(0, 12).map((run) => (
+                  <button className={`runs-table-row ${run.runId === selectedRunId ? "active" : ""}`} type="button" key={run.runId} onClick={() => setSelectedRunId(run.runId)}>
+                    <span>{run.runId}</span>
+                    <span>{run.route || "unknown"}</span>
+                    <span className={run.ok === false || run.route === "error" ? "status-error" : "status-ok"}>{run.ok === false || run.route === "error" ? "error" : "ok"}</span>
+                    <span>{formatLatency(run.durationSeconds)}</span>
+                    <span>{formatNumber(run.totalTokens)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="detail-grid">
+            <div className="detail-stack">
+              <Surface title="Agent 分布" meta={`${agents.length} agents`} collapsed={collapsed.agents} onToggle={() => toggle("agents")} className="agents-surface">
+                {!agents.length ? <div className="empty-state">暂无 Agent 调用数据。</div> : agents.map(([name, counts]) => <AgentRow key={name} name={name} counts={counts} />)}
+              </Surface>
+
+              <Surface title="产物与文件" meta={`${files.length} files`} collapsed={collapsed.files} onToggle={() => toggle("files")} className="files-surface">
+                <GroupedFiles runId={selectedRunId} files={files} artifacts={artifacts} />
+              </Surface>
+            </div>
+
+            <Surface title="事件时间线" meta={`${events.length} events`} collapsed={collapsed.events} onToggle={() => toggle("events")} className="timeline-surface">
+              {!events.length ? <div className="empty-state">暂无模型或工具事件。</div> : events.slice().reverse().map((event, index) => <EventRow key={index} event={event} />)}
             </Surface>
-
-            <Surface title="产物与文件" meta={`${files.length} files`} collapsed={collapsed.files} onToggle={() => toggle("files")} className="files-surface">
-              <GroupedFiles runId={selectedRunId} files={files} artifacts={artifacts} />
-            </Surface>
-          </div>
-
-          <Surface title="事件时间线" meta={`${events.length} events`} collapsed={collapsed.events} onToggle={() => toggle("events")} className="timeline-surface">
-            {!events.length ? <div className="empty-state">暂无模型或工具事件。</div> : events.slice().reverse().map((event, index) => <EventRow key={index} event={event} />)}
-          </Surface>
-        </section>
+          </section>
+        </div>
       </section>
     </main>
   );
@@ -570,11 +651,12 @@ function ArtifactCard({ runId, artifact }) {
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, meta, tone }) {
   return (
-    <div className="metric">
+    <div className={`metric ${tone ? `metric-${tone}` : ""}`}>
       <span>{label}</span>
       <strong>{value || "0"}</strong>
+      {meta && <small>{meta}</small>}
     </div>
   );
 }
@@ -705,6 +787,21 @@ function formatNumber(value) {
 
 function formatSeconds(value) {
   return `${Number(value || 0).toFixed(1)}s`;
+}
+
+function formatLatency(value) {
+  const seconds = Number(value || 0);
+  if (!seconds) return "0s";
+  if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+  return `${seconds.toFixed(1)}s`;
+}
+
+function formatPercent(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function formatWindowLabel(days) {
+  return Number(days || 0) ? `${days}d` : "all";
 }
 
 function formatFileLabel(path) {
