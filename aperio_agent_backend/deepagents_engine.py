@@ -11,8 +11,10 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from .config import get_api_key, get_base_url, get_model_name
 from .hitl import build_interrupt_policy, resolve_human_interrupts
+from .middleware import FinalOutputGuardMiddleware, RouterToolGuardMiddleware, ToolAllowlistMiddleware
 from .mcp_tools import load_mcp_tools
 from .observability import RunTelemetry, TelemetryMiddleware
+from .policy import write_local_policy
 from .resources import copy_packaged_skills
 
 
@@ -33,6 +35,7 @@ def run_deep_agent(
     run_root.mkdir(parents=True, exist_ok=True)
     copy_packaged_skills(run_root)
     _write_input_files(run_root, message, input_bundle, code_scan_summary)
+    write_local_policy(run_root, input_bundle)
 
     backend = FilesystemBackend(root_dir=str(run_root), virtual_mode=True)
     model = _model()
@@ -42,12 +45,32 @@ def run_deep_agent(
     shared_tools = mcp_toolset.shared
     general_tools = [*mcp_toolset.shared, *mcp_toolset.general_purpose]
     interrupt_on = build_interrupt_policy()
+    router_prompt = _router_prompt()
+    code_health_final_paths: set[str] = set()
+    prd_review_final_paths: set[str] = set()
     permissions = [
         FilesystemPermission(operations=["read", "write"], paths=["/*"], mode="allow"),
     ]
 
-    code_health_agent = _compiled_code_health_agent(model, backend, checkpointer, permissions, interrupt_on, telemetry)
-    prd_agent = _compiled_prd_agent(model, backend, checkpointer, permissions, interrupt_on, shared_tools, telemetry)
+    code_health_agent = _compiled_code_health_agent(
+        model,
+        backend,
+        checkpointer,
+        permissions,
+        interrupt_on,
+        telemetry,
+        code_health_final_paths,
+    )
+    prd_agent = _compiled_prd_agent(
+        model,
+        backend,
+        checkpointer,
+        permissions,
+        interrupt_on,
+        shared_tools,
+        telemetry,
+        prd_review_final_paths,
+    )
     general_agent = _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, general_tools, telemetry)
 
     router = create_deep_agent(
@@ -55,10 +78,13 @@ def run_deep_agent(
         tools=[],
         backend=backend,
         checkpointer=checkpointer,
-        middleware=[TelemetryMiddleware(telemetry, "aperio-router")],
+        middleware=[
+            RouterToolGuardMiddleware(router_prompt),
+            TelemetryMiddleware(telemetry, "aperio-router"),
+        ],
         permissions=permissions,
         interrupt_on=interrupt_on,
-        system_prompt=_router_prompt(),
+        system_prompt=router_prompt,
         subagents=[code_health_agent, prd_agent, general_agent],
         name="aperio-router",
     )
@@ -80,6 +106,7 @@ def run_deep_agent(
                         "运行时输入：\n"
                         "- /inputs/input_bundle.json 是标准化输入包。\n"
                         "- /inputs/user_request.md 是用户原始请求。\n"
+                        "- /local-resources/aperio_policy.yaml 是本次运行的安全、存储、输出策略。\n"
                         "- 如果是代码健康任务，/outputs/code_health/raw/tool_results.json 是后端扫描器生成的确定性证据。\n\n"
                         f"{runtime_notes}"
                         "请只通过 task 委托给合适的子 agent，完成后用中文简要返回结果和产物路径。"
@@ -124,18 +151,34 @@ def _write_input_files(
     )
 
 
-def _compiled_code_health_agent(model, backend, checkpointer, permissions, interrupt_on, telemetry: RunTelemetry) -> dict[str, Any]:
+def _compiled_code_health_agent(
+    model,
+    backend,
+    checkpointer,
+    permissions,
+    interrupt_on,
+    telemetry: RunTelemetry,
+    completed_paths: set[str],
+) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
         tools=[],
         backend=backend,
         checkpointer=checkpointer,
-        middleware=[TelemetryMiddleware(telemetry, "code-health-orchestrator")],
+        middleware=[
+            ToolAllowlistMiddleware({"read_file", "write_file", "task", "write_todos"}, "code-health orchestrator"),
+            FinalOutputGuardMiddleware(
+                {"/outputs/code_health/code_health_report.md"},
+                "code-health orchestrator",
+                completed_paths,
+            ),
+            TelemetryMiddleware(telemetry, "code-health-orchestrator"),
+        ],
         permissions=permissions,
         interrupt_on=interrupt_on,
         skills=["/skills/code-health"],
         system_prompt=_code_health_prompt(),
-        subagents=_code_health_reviewers(telemetry),
+        subagents=_code_health_reviewers(telemetry, completed_paths),
         name="code-health-orchestrator",
     )
     return {
@@ -153,18 +196,30 @@ def _compiled_prd_agent(
     interrupt_on,
     web_tools: list[Any],
     telemetry: RunTelemetry,
+    completed_paths: set[str],
 ) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
         tools=web_tools,
         backend=backend,
         checkpointer=checkpointer,
-        middleware=[TelemetryMiddleware(telemetry, "prd-review-orchestrator")],
+        middleware=[
+            ToolAllowlistMiddleware(
+                {"read_file", "write_file", "internet_search", "task", "write_todos"},
+                "PRD review orchestrator",
+            ),
+            FinalOutputGuardMiddleware(
+                {"/outputs/prd_review/prd_v2_final.md", "/outputs/prd_review/review_matrix.md"},
+                "PRD review orchestrator",
+                completed_paths,
+            ),
+            TelemetryMiddleware(telemetry, "prd-review-orchestrator"),
+        ],
         permissions=permissions,
         interrupt_on=interrupt_on,
         skills=["/skills/prd-review", "/skills/shared"],
         system_prompt=_prd_prompt(),
-        subagents=_prd_reviewers(web_tools, telemetry),
+        subagents=_prd_reviewers(web_tools, telemetry, completed_paths),
         name="prd-review-orchestrator",
     )
     return {
@@ -188,7 +243,10 @@ def _compiled_general_agent(
         tools=tools,
         backend=backend,
         checkpointer=checkpointer,
-        middleware=[TelemetryMiddleware(telemetry, "general-purpose")],
+        middleware=[
+            ToolAllowlistMiddleware({"read_file", *{str(getattr(tool, "name", "")) for tool in tools}}, "general-purpose"),
+            TelemetryMiddleware(telemetry, "general-purpose"),
+        ],
         permissions=permissions,
         interrupt_on=interrupt_on,
         skills=["/skills/shared"],
@@ -224,10 +282,11 @@ def _code_health_prompt() -> str:
 输入：
 - /inputs/user_request.md：用户原始请求。
 - /inputs/input_bundle.json：标准化输入包，包含项目路径、目标路径和运行上下文。
+- /local-resources/aperio_policy.yaml：安全、工具、存储和最终产物策略。
 - /outputs/code_health/raw/tool_results.json：后端已执行的确定性扫描结果。
 
 工作流：
-1. 先读取 /outputs/code_health/raw/tool_results.json 和 /inputs/input_bundle.json。
+1. 先读取 /local-resources/aperio_policy.yaml、/outputs/code_health/raw/tool_results.json 和 /inputs/input_bundle.json。
 2. 使用 task 分别委托四个子 agent，必须生成这四个草稿：
    - /outputs/code_health/drafts/architect.md
    - /outputs/code_health/drafts/security.md
@@ -243,13 +302,16 @@ def _code_health_prompt() -> str:
 - 不要写 HTML、JSON 可视化或别名报告。"""
 
 
-def _code_health_reviewers(telemetry: RunTelemetry) -> list[dict[str, Any]]:
+def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -> list[dict[str, Any]]:
     return [
         {
             "name": "architect",
             "description": "分析目录结构、模块边界、耦合、可维护性和代码坏味道。",
             "skills": ["/skills/code-health"],
-            "middleware": [TelemetryMiddleware(telemetry, "code-health.architect")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health architect"),
+                TelemetryMiddleware(telemetry, "code-health.architect"),
+            ],
             "system_prompt": """你是代码架构师。读取 /outputs/code_health/raw/tool_results.json，必要时读取 /inputs/code_scan_summary.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/architect.md。只基于已有扫描事实和输入摘要，不要泛读源码或虚构发现。""",
         },
@@ -257,7 +319,10 @@ def _code_health_reviewers(telemetry: RunTelemetry) -> list[dict[str, Any]]:
             "name": "security-analyst",
             "description": "分析安全风险、疑似密钥、Bandit/detect-secrets 结果和人工安全判断边界。",
             "skills": ["/skills/code-health"],
-            "middleware": [TelemetryMiddleware(telemetry, "code-health.security-analyst")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health security analyst"),
+                TelemetryMiddleware(telemetry, "code-health.security-analyst"),
+            ],
             "system_prompt": """你是应用安全工程师。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/security.md。没有确定证据时标为待复核，不要编造漏洞或 CVE。""",
         },
@@ -265,7 +330,10 @@ def _code_health_reviewers(telemetry: RunTelemetry) -> list[dict[str, Any]]:
             "name": "dependency-checker",
             "description": "分析依赖清单、pip-audit/deptry 覆盖、依赖安装限制和升级建议。",
             "skills": ["/skills/code-health"],
-            "middleware": [TelemetryMiddleware(telemetry, "code-health.dependency-checker")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health dependency checker"),
+                TelemetryMiddleware(telemetry, "code-health.dependency-checker"),
+            ],
             "system_prompt": """你是依赖管理专家。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/dependencies.md。pip-audit 跳过或超时时必须明确说明不能证明依赖安全。""",
         },
@@ -273,7 +341,10 @@ def _code_health_reviewers(telemetry: RunTelemetry) -> list[dict[str, Any]]:
             "name": "doc-reviewer",
             "description": "分析 README、docstring、测试与文档覆盖限制。",
             "skills": ["/skills/code-health"],
-            "middleware": [TelemetryMiddleware(telemetry, "code-health.doc-reviewer")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health doc reviewer"),
+                TelemetryMiddleware(telemetry, "code-health.doc-reviewer"),
+            ],
             "system_prompt": """你是技术文档专家。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/documentation.md。重点说明文档、测试和覆盖率证据是否充分。""",
         },
@@ -281,7 +352,15 @@ def _code_health_reviewers(telemetry: RunTelemetry) -> list[dict[str, Any]]:
             "name": "summarizer",
             "description": "合并四个代码健康草稿和工具结果，生成最终中文代码健康报告。",
             "skills": ["/skills/code-health"],
-            "middleware": [TelemetryMiddleware(telemetry, "code-health.summarizer")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health summarizer"),
+                FinalOutputGuardMiddleware(
+                    {"/outputs/code_health/code_health_report.md"},
+                    "code-health summarizer",
+                    completed_paths,
+                ),
+                TelemetryMiddleware(telemetry, "code-health.summarizer"),
+            ],
             "system_prompt": """你是代码健康报告编辑。读取：
 - /outputs/code_health/raw/tool_results.json
 - /outputs/code_health/drafts/architect.md
@@ -301,9 +380,10 @@ def _prd_prompt() -> str:
 输入：
 - /inputs/user_request.md：用户原始需求。
 - /inputs/input_bundle.json：标准化输入包。
+- /local-resources/aperio_policy.yaml：安全、工具、存储和最终产物策略。
 
 工作流：
-1. 先基于用户输入写 PRD 初稿 /outputs/prd_review/prd_v1.md。缺失信息标为“待确认”，不要用示例补全事实。
+1. 先读取 /local-resources/aperio_policy.yaml，再基于用户输入写 PRD 初稿 /outputs/prd_review/prd_v1.md。缺失信息标为“待确认”，不要用示例补全事实。
 2. 使用 task 分别委托四个评审子 agent，必须生成：
    - /outputs/prd_review/drafts/review_strategy.md
    - /outputs/prd_review/drafts/review_tech.md
@@ -320,14 +400,18 @@ def _prd_prompt() -> str:
 - 不要创建 final_report.md、merged-report.md 或根目录别名文件。"""
 
 
-def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry) -> list[dict[str, Any]]:
+def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_paths: set[str]) -> list[dict[str, Any]]:
+    web_tool_names = {str(getattr(tool, "name", "")) for tool in web_tools}
     return [
         {
             "name": "product-strategist",
             "description": "从产品策略、价值、范围和运营视角评审 PRD。",
             "skills": ["/skills/prd-review", "/skills/shared"],
             "tools": web_tools,
-            "middleware": [TelemetryMiddleware(telemetry, "prd-review.product-strategist")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file", "internet_search", *web_tool_names}, "PRD product strategist"),
+                TelemetryMiddleware(telemetry, "prd-review.product-strategist"),
+            ],
             "system_prompt": """你是产品策略分析师。读取 /outputs/prd_review/prd_v1.md。
 如果 internet_search 工具可用，最多调用 1 次并保存到 /outputs/prd_review/raw/web_search/product-strategy.json；如果工具不可用，不要假装已经联网搜索。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_strategy.md。""",
@@ -336,7 +420,10 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry) -> list[dict[s
             "name": "technical-feasibility",
             "description": "从技术可行性、架构、集成、数据和实施复杂度视角评审 PRD。",
             "skills": ["/skills/prd-review"],
-            "middleware": [TelemetryMiddleware(telemetry, "prd-review.technical-feasibility")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD technical feasibility reviewer"),
+                TelemetryMiddleware(telemetry, "prd-review.technical-feasibility"),
+            ],
             "system_prompt": """你是技术架构师。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_tech.md。重点指出技术风险、依赖和验收可测性。""",
         },
@@ -344,7 +431,10 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry) -> list[dict[s
             "name": "ux-researcher",
             "description": "从用户体验、用户流程、边界情况和可访问性视角评审 PRD。",
             "skills": ["/skills/prd-review"],
-            "middleware": [TelemetryMiddleware(telemetry, "prd-review.ux-researcher")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD UX researcher"),
+                TelemetryMiddleware(telemetry, "prd-review.ux-researcher"),
+            ],
             "system_prompt": """你是 UX 研究员。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_ux.md。重点检查场景、流程、异常状态和用户反馈。""",
         },
@@ -352,7 +442,10 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry) -> list[dict[s
             "name": "risk-analyst",
             "description": "从项目风险、隐私、安全、合规、资源和里程碑视角评审 PRD。",
             "skills": ["/skills/prd-review"],
-            "middleware": [TelemetryMiddleware(telemetry, "prd-review.risk-analyst")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD risk analyst"),
+                TelemetryMiddleware(telemetry, "prd-review.risk-analyst"),
+            ],
             "system_prompt": """你是项目风险分析师。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_risk.md。风险必须可追溯到 PRD 或用户输入。""",
         },
@@ -360,7 +453,15 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry) -> list[dict[s
             "name": "editor",
             "description": "合并 PRD 初稿和四个评审草稿，输出 PRD v2 与评审矩阵。",
             "skills": ["/skills/prd-review"],
-            "middleware": [TelemetryMiddleware(telemetry, "prd-review.editor")],
+            "middleware": [
+                ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD editor"),
+                FinalOutputGuardMiddleware(
+                    {"/outputs/prd_review/prd_v2_final.md", "/outputs/prd_review/review_matrix.md"},
+                    "PRD editor",
+                    completed_paths,
+                ),
+                TelemetryMiddleware(telemetry, "prd-review.editor"),
+            ],
             "system_prompt": """你是 PRD 编辑。读取：
 - /outputs/prd_review/prd_v1.md
 - /outputs/prd_review/drafts/review_strategy.md
