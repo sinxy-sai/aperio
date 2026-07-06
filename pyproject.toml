@@ -51,4 +51,4 @@ aperio_agent_backend = [
   "skill-assets/**/*.py",
   "skill-assets/**/*.txt",
 ]
-"aperio_agent_web.static" = ["*.html", "*.css", "*.js", "vendor/**/*.js"]
+"aperio_agent_web.static" = ["*.html", "*.css", "*.js", "vendor/**/*.js", "react/**/*"]

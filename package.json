@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "sync:lucide": "node scripts/sync-lucide.mjs",
-    "check:frontend": "node --check aperio_agent_web/static/app.js && node --check aperio_agent_web/static/observability.js"
+    "dev:frontend": "vite --config aperio_agent_web/frontend/vite.config.mjs",
+    "build:frontend": "vite build --config aperio_agent_web/frontend/vite.config.mjs",
+    "check:frontend": "npm run build:frontend"
   },
   "repository": {
     "type": "git",
@@ -20,6 +22,11 @@
   },
   "homepage": "https://github.com/sinxy-sai/aperio#readme",
   "dependencies": {
-    "lucide": "^1.23.0"
+    "@vitejs/plugin-react": "^6.0.3",
+    "lucide": "^1.23.0",
+    "lucide-react": "^1.23.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "vite": "^8.1.3"
   }
 }

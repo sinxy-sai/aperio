@@ -178,6 +178,54 @@ function renderRecentSessions() {
   }
 }
 
+function renderRecentSessions() {
+  if (!recentSessions) return;
+  const items = chatSessions.slice(0, 8);
+  if (!items.length) {
+    recentSessions.innerHTML = "<span>暂无会话</span>";
+    return;
+  }
+  recentSessions.innerHTML = "";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "recent-session-row";
+    if (item.id === activeSessionId) row.classList.add("active");
+    row.innerHTML = `
+      <button class="recent-session" type="button">
+        <strong>${escapeHtml(item.title || "新对话")}</strong>
+        <small>${escapeHtml(item.runId || "未运行")}</small>
+      </button>
+      <button class="recent-delete" type="button" aria-label="删除会话" title="删除会话">
+        <i data-lucide="trash-2" aria-hidden="true"></i>
+      </button>
+    `;
+    row.querySelector(".recent-session").addEventListener("click", () => selectSession(item.id));
+    row.querySelector(".recent-delete").addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteSession(item.id);
+    });
+    recentSessions.append(row);
+  }
+  renderLucideIcons(recentSessions);
+}
+
+function deleteSession(sessionId) {
+  const wasActive = sessionId === activeSessionId;
+  chatSessions = chatSessions.filter((item) => item.id !== sessionId);
+  if (wasActive) {
+    activeSessionId = chatSessions[0]?.id || "";
+    if (!activeSessionId) {
+      createSession();
+    }
+    const session = activeSession();
+    selectedRunId = session.runId || "";
+    history.replaceState(null, "", `/?session=${encodeURIComponent(activeSessionId)}`);
+    renderSessionMessages(session);
+  }
+  saveSessions();
+  renderRecentSessions();
+}
+
 function initializeSession() {
   loadStoredSessions();
   const requested = new URLSearchParams(window.location.search).get("session");

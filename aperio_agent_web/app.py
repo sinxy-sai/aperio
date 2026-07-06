@@ -25,6 +25,7 @@ from aperio_agent_backend.runner import read_artifacts, run_agent, safe_artifact
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
+REACT_INDEX = STATIC_DIR / "react" / "index.html"
 
 
 class ChatRequest(BaseModel):
@@ -39,11 +40,15 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
+    if REACT_INDEX.exists():
+        return REACT_INDEX.read_text(encoding="utf-8")
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/observability", response_class=HTMLResponse)
 def observability() -> str:
+    if REACT_INDEX.exists():
+        return REACT_INDEX.read_text(encoding="utf-8")
     return (STATIC_DIR / "observability.html").read_text(encoding="utf-8")
 
 
