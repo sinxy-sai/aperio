@@ -35,3 +35,20 @@ aperio_agent_backend/workspace/<run_id>/
 - 轻量代码健康报告
 
 代码健康报告不使用 Docker，不运行测试或安全扫描工具；它基于项目结构抽样和 LLM 总结生成。
+
+## CLI
+
+安装包后，直接运行：
+
+```powershell
+aperio
+```
+
+即可进入持续聊天模式。常用命令：
+
+```powershell
+aperio init
+aperio doctor
+aperio run "帮我写一份 PRD"
+aperio serve --host 127.0.0.1 --port 8088
+```

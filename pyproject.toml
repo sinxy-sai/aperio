@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aperio-agent"
+version = "0.1.0"
+description = "Aperio local agent backend, CLI, and web UI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Aperio contributors" }
+]
+dependencies = [
+  "fastapi>=0.110",
+  "langchain>=0.3",
+  "python-dotenv>=1.0",
+  "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+web = [
+  "uvicorn>=0.29",
+]
+dev = [
+  "build>=1.0",
+]
+
+[project.scripts]
+aperio = "aperio_agent_backend.cli:main"
+
+[tool.setuptools]
+packages = ["aperio_agent_backend", "aperio_agent_web", "aperio_agent_web.static"]
+
+[tool.setuptools.package-data]
+aperio_agent_backend = [".env.example"]
+"aperio_agent_web.static" = ["*.html", "*.css", "*.js"]

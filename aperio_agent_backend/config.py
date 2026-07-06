@@ -7,11 +7,16 @@ from dotenv import load_dotenv
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BACKEND_DIR.parent
-WORKSPACE_ROOT = BACKEND_DIR / "workspace"
+PACKAGE_ROOT = BACKEND_DIR.parent
+APERIO_HOME = Path(os.environ.get("APERIO_HOME", Path.home() / ".aperio")).expanduser().resolve()
+PROJECT_ROOT = Path(os.environ.get("APERIO_PROJECT_ROOT", Path.cwd())).expanduser().resolve()
+WORKSPACE_ROOT = Path(
+    os.environ.get("APERIO_WORKSPACE_ROOT", APERIO_HOME / "workspace")
+).expanduser().resolve()
 
 load_dotenv(BACKEND_DIR / ".env")
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PACKAGE_ROOT / ".env")
+load_dotenv(APERIO_HOME / ".env")
 
 
 def get_api_key() -> str:

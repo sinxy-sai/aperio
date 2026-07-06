@@ -22,6 +22,14 @@ APERIO_BASE_URL=https://api.deepseek.com
 
 ## 启动
 
+安装为包后，推荐使用：
+
+```powershell
+aperio serve --host 127.0.0.1 --port 8088
+```
+
+本仓库源码运行也可以用：
+
 ```powershell
 conda activate llm-dev
 python -m uvicorn aperio_agent_web.app:app --reload --host 127.0.0.1 --port 8088
