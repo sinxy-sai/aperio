@@ -1,13 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const frontendRoot = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  root: resolve("aperio_agent_web/frontend"),
+  root: frontendRoot,
   base: "/static/react/",
   plugins: [react()],
   build: {
-    outDir: resolve("aperio_agent_web/static/react"),
+    outDir: resolve(frontendRoot, "../static/react"),
     emptyOutDir: true,
   },
 });
