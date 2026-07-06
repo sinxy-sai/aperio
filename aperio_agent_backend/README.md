@@ -75,3 +75,23 @@ aperio doctor
 aperio run "帮我写一份 PRD"
 aperio serve --host 127.0.0.1 --port 8088
 ```
+
+交互模式支持常用 slash 命令：
+
+```text
+/help, /?                 查看命令
+/exit, /quit, /q          退出
+/doctor                   检查环境配置
+/init [--force]           创建或覆盖 ~/.aperio/.env
+/config, /status          查看当前 CLI、模型和运行配置
+/workspace, /pwd          查看运行产物目录
+/approval [mode]          查看或设置 prompt|approve|reject
+/timeout [seconds]        查看或设置超时时间
+/runs [n], /ls [n]        查看最近运行
+/artifacts [run_id|last]  查看运行产物和 trace 文件
+/last, /answer            重印上一条回复
+/history [n]              查看当前 CLI 会话历史
+/clear                    清空当前 CLI 会话历史
+/retry                    重跑上一条用户请求
+/serve [port], /web [p]   启动本地 Web UI
+```

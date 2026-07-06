@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
+import shlex
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .config import (
     APERIO_HOME,
@@ -18,6 +22,15 @@ from .config import (
     get_scan_sandbox_mode,
 )
 from .runner import run_agent
+
+
+@dataclass
+class ReplState:
+    approval_mode: str = "prompt"
+    timeout_seconds: int = 900
+    last_message: str = ""
+    last_result: Any | None = None
+    history: list[dict[str, str]] = field(default_factory=list)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def repl() -> int:
+    state = ReplState()
     print("Aperio Agent")
     print("Type /help for commands, /exit to quit.")
     print(f"Workspace: {WORKSPACE_ROOT}")
@@ -79,25 +93,227 @@ def repl() -> int:
 
         if not message:
             continue
-        if message in {"/exit", "/quit", "exit", "quit"}:
+        if message in {"exit", "quit"}:
             return 0
-        if message == "/help":
-            _print_repl_help()
-            continue
-        if message == "/doctor":
-            doctor()
-            continue
-        if message == "/init":
-            init_config(force=False)
+        if message.startswith("/"):
+            exit_code = _handle_repl_command(message, state)
+            if exit_code is not None:
+                return exit_code
             continue
 
-        result = run_agent(message, approval_mode="prompt")
-        print()
-        print(result.answer)
-        if result.artifacts:
-            print("\nArtifacts:")
-            for artifact in result.artifacts:
-                print(f"  - {WORKSPACE_ROOT / result.run_id / artifact.path}")
+        _run_repl_message(message, state)
+
+
+def _run_repl_message(message: str, state: ReplState) -> None:
+    result = run_agent(
+        message,
+        approval_mode=state.approval_mode,
+        timeout_seconds=state.timeout_seconds,
+    )
+    state.last_message = message
+    state.last_result = result
+    state.history.append({"role": "user", "text": message})
+    state.history.append({"role": "assistant", "text": result.answer})
+    print()
+    print(result.answer)
+    _print_artifacts(result.run_id, result.artifacts)
+
+
+def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
+    try:
+        parts = shlex.split(command_line)
+    except ValueError as exc:
+        print(f"Command parse error: {exc}")
+        return None
+    if not parts:
+        return None
+
+    command = parts[0].lower()
+    args = parts[1:]
+    if command in {"/exit", "/quit", "/q"}:
+        return 0
+    if command in {"/help", "/?"}:
+        _print_repl_help()
+    elif command == "/doctor":
+        doctor()
+    elif command == "/init":
+        init_config(force="--force" in args)
+    elif command in {"/config", "/status"}:
+        _print_repl_status(state)
+    elif command in {"/workspace", "/pwd"}:
+        print(WORKSPACE_ROOT)
+    elif command == "/approval":
+        _set_approval_mode(args, state)
+    elif command == "/timeout":
+        _set_timeout(args, state)
+    elif command in {"/runs", "/ls"}:
+        _print_recent_runs(_parse_limit(args, default=10, maximum=50))
+    elif command in {"/artifacts", "/files"}:
+        _print_run_artifacts(args, state)
+    elif command in {"/last", "/answer"}:
+        _print_last_result(state)
+    elif command == "/history":
+        _print_history(state, _parse_limit(args, default=12, maximum=100))
+    elif command == "/clear":
+        state.history.clear()
+        print("Cleared in-memory CLI history.")
+    elif command == "/retry":
+        if not state.last_message:
+            print("No previous prompt to retry.")
+        else:
+            _run_repl_message(state.last_message, state)
+    elif command in {"/serve", "/web"}:
+        port = _parse_port(args, default=8088)
+        serve(host="127.0.0.1", port=port, reload=False)
+    else:
+        print(f"Unknown command: {command}. Type /help for commands.")
+    return None
+
+
+def _set_approval_mode(args: list[str], state: ReplState) -> None:
+    if not args:
+        print(f"approval_mode = {state.approval_mode}")
+        return
+    value = args[0].strip().lower()
+    if value not in {"prompt", "approve", "reject"}:
+        print("Usage: /approval prompt|approve|reject")
+        return
+    state.approval_mode = value
+    print(f"approval_mode = {state.approval_mode}")
+
+
+def _set_timeout(args: list[str], state: ReplState) -> None:
+    if not args:
+        print(f"timeout_seconds = {state.timeout_seconds}")
+        return
+    try:
+        value = int(args[0])
+    except ValueError:
+        print("Usage: /timeout <seconds>")
+        return
+    if value < 30 or value > 3600:
+        print("Timeout must be between 30 and 3600 seconds.")
+        return
+    state.timeout_seconds = value
+    print(f"timeout_seconds = {state.timeout_seconds}")
+
+
+def _print_repl_status(state: ReplState) -> None:
+    print("Aperio CLI status")
+    print(f"Home:      {APERIO_HOME}")
+    print(f"Workspace: {WORKSPACE_ROOT}")
+    print(f"Engine:    {get_engine_name()}")
+    print(f"Model:     {get_model_name()}")
+    print(f"Approval:  {state.approval_mode}")
+    print(f"Timeout:   {state.timeout_seconds}s")
+    print(f"MCP tools: {'enabled' if get_enable_mcp_tools() else 'disabled'}")
+    print(f"API key:   {'configured' if get_api_key() else 'missing'}")
+
+
+def _print_recent_runs(limit: int) -> None:
+    runs = _recent_run_roots(limit)
+    if not runs:
+        print("No runs found.")
+        return
+    for run_root in runs:
+        performance = _read_json(run_root / "performance.json")
+        route = performance.get("route", "unknown")
+        ok = performance.get("ok")
+        duration = performance.get("duration_seconds", 0)
+        status = "ok" if ok is True else "failed" if ok is False else "unknown"
+        print(f"{run_root.name}  {status}  {route}  {duration}s")
+
+
+def _print_run_artifacts(args: list[str], state: ReplState) -> None:
+    run_id = args[0] if args else "last"
+    if run_id == "last":
+        run_id = getattr(state.last_result, "run_id", "") or _latest_run_id()
+    if not run_id:
+        print("No run id available.")
+        return
+    run_root = WORKSPACE_ROOT / run_id
+    if not run_root.exists() or not run_root.is_dir():
+        print(f"Run not found: {run_id}")
+        return
+    artifacts = []
+    for path in sorted(run_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name in {"performance.json", "observability.json"} or path.suffix.lower() in {".md", ".json", ".txt"}:
+            artifacts.append(path)
+    if not artifacts:
+        print(f"No artifacts found for {run_id}.")
+        return
+    for artifact in artifacts[:80]:
+        print(f"  - {artifact}")
+
+
+def _print_last_result(state: ReplState) -> None:
+    if not state.last_result:
+        print("No answer yet.")
+        return
+    print(state.last_result.answer)
+    _print_artifacts(state.last_result.run_id, state.last_result.artifacts)
+
+
+def _print_history(state: ReplState, limit: int) -> None:
+    if not state.history:
+        print("No in-memory CLI history.")
+        return
+    for item in state.history[-limit:]:
+        text = item["text"].replace("\n", " ")
+        if len(text) > 120:
+            text = text[:117] + "..."
+        print(f"{item['role']}: {text}")
+
+
+def _print_artifacts(run_id: str, artifacts: Any) -> None:
+    if not artifacts:
+        return
+    print("\nArtifacts:")
+    for artifact in artifacts:
+        print(f"  - {WORKSPACE_ROOT / run_id / artifact.path}")
+
+
+def _parse_limit(args: list[str], *, default: int, maximum: int) -> int:
+    if not args:
+        return default
+    try:
+        return max(1, min(int(args[0]), maximum))
+    except ValueError:
+        print(f"Invalid limit, using {default}.")
+        return default
+
+
+def _parse_port(args: list[str], *, default: int) -> int:
+    if not args:
+        return default
+    try:
+        port = int(args[0])
+    except ValueError:
+        print(f"Invalid port, using {default}.")
+        return default
+    return max(1, min(port, 65535))
+
+
+def _recent_run_roots(limit: int) -> list[Path]:
+    if not WORKSPACE_ROOT.exists():
+        return []
+    return [item for item in sorted(WORKSPACE_ROOT.iterdir(), reverse=True) if item.is_dir()][:limit]
+
+
+def _latest_run_id() -> str:
+    runs = _recent_run_roots(1)
+    return runs[0].name if runs else ""
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
 
 
 def run_once(message_parts: list[str], approval_mode: str, timeout_seconds: int) -> int:
@@ -167,12 +383,23 @@ def doctor() -> int:
 def _print_repl_help() -> None:
     print(
         "Commands:\n"
-        "  /help    Show this help\n"
-        "  /doctor  Check configuration\n"
-        "  /init    Create ~/.aperio/.env\n"
-        "  /exit    Quit\n"
+        "  /help, /?                 Show this help\n"
+        "  /exit, /quit, /q          Quit\n"
+        "  /doctor                   Check environment and config\n"
+        "  /init [--force]           Create ~/.aperio/.env\n"
+        "  /config, /status          Show CLI and model status\n"
+        "  /workspace, /pwd          Show the run workspace\n"
+        "  /approval [mode]          Show or set prompt|approve|reject\n"
+        "  /timeout [seconds]        Show or set agent timeout\n"
+        "  /runs [n], /ls [n]        List recent runs\n"
+        "  /artifacts [run_id|last]  List run artifacts and trace files\n"
+        "  /last, /answer            Print the last answer again\n"
+        "  /history [n]              Show in-memory CLI conversation history\n"
+        "  /clear                    Clear in-memory CLI history\n"
+        "  /retry                    Rerun the previous prompt\n"
+        "  /serve [port], /web [p]   Start the local Web UI\n"
         "\n"
-        "Any other input is sent to the agent."
+        "Any other input is sent to the agent. Use quotes for command args with spaces."
     )
 
 
