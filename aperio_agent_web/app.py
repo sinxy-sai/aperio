@@ -8,7 +8,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from aperio_agent_backend.config import WORKSPACE_ROOT, get_api_key, get_model_name
+from aperio_agent_backend.config import (
+    WORKSPACE_ROOT,
+    get_api_key,
+    get_engine_name,
+    get_install_project_deps,
+    get_model_name,
+)
 from aperio_agent_backend.runner import run_agent, safe_artifact_path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -35,7 +41,9 @@ def health() -> dict[str, Any]:
     return {
         "ok": bool(get_api_key()),
         "backend": "aperio_agent_backend",
+        "engine": get_engine_name(),
         "model": get_model_name(),
+        "installProjectDeps": get_install_project_deps(),
         "workspace": str(WORKSPACE_ROOT),
         "configured": bool(get_api_key()),
     }

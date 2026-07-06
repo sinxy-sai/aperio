@@ -14,8 +14,10 @@ Copy-Item aperio_agent_backend/.env.example aperio_agent_backend/.env
 
 ```env
 DEEPSEEK_API_KEY=你的 key
+APERIO_ENGINE=deepagents
 APERIO_MODEL=openai:deepseek-v4-flash
 APERIO_BASE_URL=https://api.deepseek.com
+APERIO_INSTALL_PROJECT_DEPS=0
 ```
 
 也可以直接在当前 shell 中设置这些环境变量。
@@ -32,9 +34,11 @@ aperio_agent_backend/workspace/<run_id>/
 
 - 通用问答
 - PRD 生成与评审矩阵
-- 轻量代码健康报告
+- 代码健康扫描与报告
 
-代码健康报告不使用 Docker，不运行测试或安全扫描工具；它基于项目结构抽样和 LLM 总结生成。
+默认使用 `APERIO_ENGINE=deepagents`，会运行包内 DeepAgents router 和子 agent。也可以设置 `APERIO_ENGINE=lite` 使用轻量 fallback。
+
+代码健康报告不使用 Docker。后端会先运行包内迁移的 `code-health-toolkit`，把确定性扫描结果写入 `outputs/code_health/raw/tool_results.json`，再交给 DeepAgents 子 agent 生成报告。默认不安装项目依赖；如果当前环境安装了 `ruff`、`mypy`、`bandit`、`radon`、`detect-secrets` 等工具，会自动纳入扫描证据。
 
 ## CLI
 

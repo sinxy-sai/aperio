@@ -130,7 +130,7 @@ async function checkHealth() {
     const res = await fetch("/api/health");
     const data = await res.json();
     if (data.ok) {
-      setStatus("ok", "已连接", `${data.backend || "agent backend"} · ${data.model || "model"}`);
+      setStatus("ok", "已连接", `${data.engine || "agent"} · ${data.model || "model"}`);
     } else {
       setStatus("error", "未配置", "请配置后端模型 API Key");
     }

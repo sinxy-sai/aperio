@@ -5,7 +5,15 @@ import shutil
 import sys
 from pathlib import Path
 
-from .config import APERIO_HOME, WORKSPACE_ROOT, get_api_key, get_base_url, get_model_name
+from .config import (
+    APERIO_HOME,
+    WORKSPACE_ROOT,
+    get_api_key,
+    get_base_url,
+    get_engine_name,
+    get_install_project_deps,
+    get_model_name,
+)
 from .runner import run_agent
 
 
@@ -114,8 +122,10 @@ def init_config(force: bool = False) -> int:
     else:
         target.write_text(
             "DEEPSEEK_API_KEY=\n"
+            "APERIO_ENGINE=deepagents\n"
             "APERIO_MODEL=openai:deepseek-v4-flash\n"
-            "APERIO_BASE_URL=https://api.deepseek.com\n",
+            "APERIO_BASE_URL=https://api.deepseek.com\n"
+            "APERIO_INSTALL_PROJECT_DEPS=0\n",
             encoding="utf-8",
         )
     print(f"Created config: {target}")
@@ -137,8 +147,10 @@ def doctor() -> int:
     print("Aperio doctor")
     print(f"Home:      {APERIO_HOME}")
     print(f"Workspace: {WORKSPACE_ROOT}")
+    print(f"Engine:    {get_engine_name()}")
     print(f"Model:     {get_model_name()}")
     print(f"Base URL:  {get_base_url()}")
+    print(f"Install deps for scan: {'yes' if get_install_project_deps() else 'no'}")
     print(f"API key:   {'configured' if get_api_key() else 'missing'}")
     return 0 if get_api_key() else 1
 

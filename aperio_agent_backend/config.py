@@ -41,3 +41,11 @@ def get_base_url() -> str:
         or os.environ.get("OPENAI_BASE_URL")
         or "https://api.deepseek.com"
     ).strip()
+
+
+def get_engine_name() -> str:
+    return os.environ.get("APERIO_ENGINE", "deepagents").strip().lower()
+
+
+def get_install_project_deps() -> bool:
+    return os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0").strip().lower() in {"1", "true", "yes", "on"}

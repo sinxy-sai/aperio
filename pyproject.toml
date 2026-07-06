@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aperio-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Aperio local agent backend, CLI, and web UI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,8 +13,10 @@ authors = [
   { name = "Aperio contributors" }
 ]
 dependencies = [
+  "deepagents>=0.6.10",
   "fastapi>=0.110",
   "langchain>=0.3",
+  "langchain-openai>=0.2",
   "python-dotenv>=1.0",
   "uvicorn>=0.29",
 ]
@@ -34,5 +36,10 @@ aperio = "aperio_agent_backend.cli:main"
 packages = ["aperio_agent_backend", "aperio_agent_web", "aperio_agent_web.static"]
 
 [tool.setuptools.package-data]
-aperio_agent_backend = [".env.example"]
+aperio_agent_backend = [
+  ".env.example",
+  "skill-assets/**/*.md",
+  "skill-assets/**/*.py",
+  "skill-assets/**/*.txt",
+]
 "aperio_agent_web.static" = ["*.html", "*.css", "*.js"]
