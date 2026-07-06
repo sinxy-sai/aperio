@@ -49,6 +49,7 @@ def run_deep_agent(
     input_bundle: dict[str, Any],
     code_scan_summary: dict[str, Any] | None = None,
     approval_mode: str = "approve",
+    cancel_event: Any | None = None,
 ) -> str:
     """Run the package-native DeepAgents implementation.
 
@@ -60,6 +61,8 @@ def run_deep_agent(
     skills_root = copy_packaged_skills(run_root)
     _write_input_files(run_root, message, input_bundle, code_scan_summary)
     write_local_policy(run_root, input_bundle)
+    if _is_cancelled(cancel_event):
+        return "本次运行已停止。"
 
     skill_sources = AgentSkillSources(skills_root)
     store = InMemoryStore()
@@ -179,8 +182,14 @@ def run_deep_agent(
         config=config,
     )
     response = resolve_human_interrupts(router, response, config, approval_mode=approval_mode)
+    if _is_cancelled(cancel_event):
+        return "本次运行已停止。"
     _write_observability(run_root, telemetry, mcp_toolset.errors)
     return _extract_final_answer(response) or "Agent run completed."
+
+
+def _is_cancelled(cancel_event: Any | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
 
 
 def _model():

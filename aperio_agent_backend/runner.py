@@ -86,16 +86,20 @@ def run_agent(
     approval_mode: str = "approve",
     timeout_seconds: int = 900,
     uploaded_inputs: list[UploadedInput] | None = None,
+    run_id: str | None = None,
+    cancel_event: Any | None = None,
 ) -> AgentRunResult:
     started = time.time()
-    run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    run_id = run_id or time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     run_root = WORKSPACE_ROOT / run_id
     run_root.mkdir(parents=True, exist_ok=True)
 
     try:
+        _raise_if_cancelled(cancel_event)
         route = _route_task(message)
         code_project_path, code_target_rel, code_target_path, code_context_found = resolve_code_context(message)
         uploaded_metadata = _write_uploaded_inputs(run_root, uploaded_inputs or [])
+        _raise_if_cancelled(cancel_event)
         input_bundle = build_input_bundle(
             run_id=run_id,
             task_text=message,
@@ -130,6 +134,7 @@ def run_agent(
                 sandbox_mode=get_scan_sandbox_mode(),
             )
             scan_summary = compact_scan_summary(scan_result)
+            _raise_if_cancelled(cancel_event)
 
         if get_engine_name() == "deepagents":
             answer = run_deep_agent(
@@ -138,6 +143,7 @@ def run_agent(
                 input_bundle=input_bundle,
                 code_scan_summary=scan_summary,
                 approval_mode=approval_mode,
+                cancel_event=cancel_event,
             )
         else:
             if route == "prd":
@@ -147,6 +153,7 @@ def run_agent(
             else:
                 answer = _run_general(message)
 
+        _raise_if_cancelled(cancel_event)
         _write_performance(run_root, started, route, ok=True)
         return AgentRunResult(
             ok=True,
@@ -157,7 +164,27 @@ def run_agent(
             artifacts=_read_artifacts(run_root),
             route=route,
         )
+    except AgentRunCancelled:
+        return AgentRunResult(
+            ok=False,
+            return_code=130,
+            duration_seconds=round(time.time() - started, 1),
+            answer="本次运行已停止。",
+            run_id=run_id,
+            artifacts=[],
+            route="cancelled",
+        )
     except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            return AgentRunResult(
+                ok=False,
+                return_code=130,
+                duration_seconds=round(time.time() - started, 1),
+                answer="本次运行已停止。",
+                run_id=run_id,
+                artifacts=[],
+                route="cancelled",
+            )
         message_text = f"后端 agent 运行失败：{exc}"
         _write_text(run_root / "error.txt", message_text)
         _write_performance(run_root, started, "error", ok=False, error=str(exc))
@@ -171,6 +198,15 @@ def run_agent(
             stderr_tail=str(exc),
             route="error",
         )
+
+
+class AgentRunCancelled(Exception):
+    pass
+
+
+def _raise_if_cancelled(cancel_event: Any | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AgentRunCancelled()
 
 
 def read_artifacts(run_root: Path | None) -> list[AgentArtifact]:

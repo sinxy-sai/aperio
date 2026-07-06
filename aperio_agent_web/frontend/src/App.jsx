@@ -16,6 +16,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Square,
   Trash2,
   Upload,
   X,
@@ -101,6 +102,7 @@ function ChatPage({ navigate }) {
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const streamRef = useRef(null);
 
   const activeSession = useMemo(() => {
     return sessions.find((item) => item.id === activeId) || sessions[0];
@@ -147,12 +149,19 @@ function ChatPage({ navigate }) {
   }
 
   function addMessage(role, text) {
-    const nextMessages = [...(activeSession?.messages || []), { role, text }];
-    const title =
-      activeSession?.title && activeSession.title !== "新对话"
-        ? activeSession.title
-        : text.slice(0, 28) || "新对话";
-    patchActiveSession({ messages: nextMessages, title });
+    const targetId = activeSession?.id;
+    if (!targetId) return;
+    updateSessions((current) =>
+      current.map((session) => {
+        if (session.id !== targetId) return session;
+        const nextMessages = [...(session.messages || []), { role, text }];
+        const title =
+          session.title && session.title !== "新对话"
+            ? session.title
+            : text.slice(0, 28) || "新对话";
+        return { ...session, messages: nextMessages, title, updatedAt: Date.now() };
+      }),
+    );
   }
 
   function selectSession(id) {
@@ -186,7 +195,26 @@ function ChatPage({ navigate }) {
     setRunMeta("等待任务");
   }
 
-  function deleteSession(id) {
+  async function deleteSession(id) {
+    const target = sessions.find((item) => item.id === id);
+    if (!target) return;
+    const confirmed = window.confirm("这次删除无法恢复，会同时删除该会话关联的运行记录和落盘文件。确定删除吗？");
+    if (!confirmed) return;
+    if (id === activeSession?.id && running) {
+      stopRunningRun();
+    }
+    if (target.runId) {
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(target.runId)}`, { method: "DELETE" });
+        if (!response.ok && response.status !== 404) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+      } catch (error) {
+        window.alert(`删除落盘运行失败：${error.message}`);
+        return;
+      }
+    }
     const remaining = sessions.filter((item) => item.id !== id);
     const nextSessions = remaining.length ? remaining : [newSession()];
     const nextActive = id === activeSession?.id ? nextSessions[0].id : activeSession?.id;
@@ -258,6 +286,22 @@ function ChatPage({ navigate }) {
     addAttachments(dropped);
   }
 
+  function stopRunningRun() {
+    const stream = streamRef.current;
+    if (stream) {
+      stream.stopped = true;
+      if (stream.runId) {
+        void fetch(`/api/runs/${encodeURIComponent(stream.runId)}/cancel`, { method: "POST" }).catch(() => {});
+      }
+      stream.controller.abort();
+      streamRef.current = null;
+    }
+    setRunning(false);
+    setDraftAssistant("");
+    setRunMeta("已停止，可重新提问");
+    addMessage("assistant", "已停止本次运行。");
+  }
+
   async function submitTask(event) {
     event.preventDefault();
     const pendingAttachments = attachments;
@@ -270,9 +314,11 @@ function ChatPage({ navigate }) {
     setRunning(true);
     setDraftAssistant("正在连接后端...");
     setRunMeta("agent 正在处理");
+    const stream = { controller: new AbortController(), runId: "", stopped: false };
+    streamRef.current = stream;
 
     try {
-      const response = await fetch("/api/chat/stream", requestBody(message, approvalMode, timeoutSeconds, pendingAttachments));
+      const response = await fetch("/api/chat/stream", requestBody(message, approvalMode, timeoutSeconds, pendingAttachments, stream.controller.signal));
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `HTTP ${response.status}`);
@@ -280,9 +326,21 @@ function ChatPage({ navigate }) {
       if (!response.body) throw new Error("当前浏览器不支持流式响应");
 
       await readNdjson(response.body, async (eventData) => {
+        const eventRunId = eventData.run_id || eventData.data?.run_id || "";
+        if (eventRunId) {
+          stream.runId = eventRunId;
+          setSelectedRunId(eventRunId);
+          patchActiveSession({ runId: eventRunId });
+        }
         if (eventData.type === "status") {
           setDraftAssistant(eventData.message || "agent 正在运行");
           setRunMeta(`运行中 · ${Number(eventData.elapsed || 0).toFixed(1)}s`);
+          return;
+        }
+        if (eventData.type === "cancelled") {
+          stream.stopped = true;
+          setDraftAssistant("");
+          setRunMeta("已停止，可重新提问");
           return;
         }
         if (eventData.type === "error") {
@@ -300,11 +358,19 @@ function ChatPage({ navigate }) {
         setRunMeta(`完成 · ${Number(result.duration_seconds || 0).toFixed(1)}s · code ${result.return_code}`);
       });
     } catch (error) {
+      if (stream.stopped || error.name === "AbortError") {
+        setDraftAssistant("");
+        setRunMeta("已停止，可重新提问");
+        return;
+      }
       setDraftAssistant("");
       addMessage("assistant", `请求失败：${error.message}`);
       setRunMeta("运行失败");
     } finally {
-      setRunning(false);
+      if (streamRef.current === stream) {
+        streamRef.current = null;
+        setRunning(false);
+      }
     }
   }
 
@@ -340,7 +406,7 @@ function ChatPage({ navigate }) {
                   <strong>{session.title || "新对话"}</strong>
                   <small>{session.runId || "未运行"}</small>
                 </button>
-                <button className="recent-delete" type="button" onClick={() => deleteSession(session.id)} title="删除会话">
+                <button className="recent-delete" type="button" onClick={() => void deleteSession(session.id)} title="删除会话">
                   <Trash2 size={16} />
                 </button>
               </div>
@@ -435,7 +501,9 @@ function ChatPage({ navigate }) {
               <button type="button" onClick={() => folderInputRef.current?.click()} title="添加文件夹"><FolderOpen size={17} />文件夹</button>
               <span>{runMeta}</span>
             </div>
-            <button id="sendBtn" type="submit" disabled={running}>{running ? "运行中" : "运行"}</button>
+            <button id="sendBtn" className={running ? "stop" : ""} type={running ? "button" : "submit"} onClick={running ? stopRunningRun : undefined}>
+              {running ? <><Square size={15} />停止</> : "运行"}
+            </button>
           </div>
           {dragActive && (
             <div className="drop-overlay">
@@ -862,11 +930,12 @@ function attachmentIcon(item) {
   return <FileIcon size={16} />;
 }
 
-function requestBody(message, approvalMode, timeoutSeconds, attachments) {
+function requestBody(message, approvalMode, timeoutSeconds, attachments, signal) {
   if (!attachments.length) {
     return {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal,
       body: JSON.stringify({
         message,
         approval_mode: approvalMode,
@@ -883,7 +952,7 @@ function requestBody(message, approvalMode, timeoutSeconds, attachments) {
     form.append("files", item.file, item.path);
     form.append("paths", item.path);
   }
-  return { method: "POST", body: form };
+  return { method: "POST", body: form, signal };
 }
 
 function formatUserMessage(message, attachments) {

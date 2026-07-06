@@ -590,16 +590,20 @@ textarea {
 }
 
 #sendBtn {
+  display: inline-flex;
   width: 108px;
   height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   border-radius: 14px;
   color: #fff;
   background: var(--green);
   font-weight: 800;
 }
 
-#sendBtn:disabled {
-  opacity: 0.55;
+#sendBtn.stop {
+  background: var(--red);
 }
 
 .artifacts {
@@ -618,17 +622,37 @@ textarea {
 }
 
 .artifact-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   padding: 22px;
 }
 
+.artifact-head > div:first-child {
+  min-width: 0;
+}
+
 .artifact-head h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 22px;
+}
+
+.artifact-actions {
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.artifact-actions > span {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-tabs {
@@ -664,12 +688,20 @@ textarea {
 }
 
 .artifact-title {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 12px;
   border-bottom: 1px solid var(--line);
   padding: 12px;
   font-weight: 800;
+}
+
+.artifact-title span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .artifact-title a,

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -30,6 +33,8 @@ REACT_INDEX = STATIC_DIR / "react" / "index.html"
 MAX_UPLOAD_FILES = 80
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_SINGLE_UPLOAD_BYTES = 25 * 1024 * 1024
+RUN_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+RUN_CANCEL_EVENTS: dict[str, threading.Event] = {}
 
 
 class ChatRequest(BaseModel):
@@ -89,6 +94,9 @@ async def chat(request: Request) -> dict[str, Any]:
 async def chat_stream(request: Request) -> StreamingResponse:
     chat_request, uploaded_inputs = await _parse_chat_request(request)
     approval_mode = _validate_approval_mode(chat_request.approval_mode)
+    run_id = _new_run_id()
+    cancel_event = threading.Event()
+    RUN_CANCEL_EVENTS[run_id] = cancel_event
 
     def stream_events():
         started = time.time()
@@ -118,6 +126,40 @@ async def chat_stream(request: Request) -> StreamingResponse:
                 yield _json_line({"type": "error", "message": str(exc)})
                 return
         yield _json_line({"type": "result", "data": result.to_dict()})
+
+    def stream_events():
+        started = time.time()
+        yield _json_line({"type": "status", "message": "已接收任务，正在启动 agent", "elapsed": 0, "run_id": run_id})
+        future = RUN_EXECUTOR.submit(
+            run_agent,
+            chat_request.message,
+            approval_mode=approval_mode,
+            timeout_seconds=chat_request.timeout_seconds,
+            uploaded_inputs=uploaded_inputs,
+            run_id=run_id,
+            cancel_event=cancel_event,
+        )
+        future.add_done_callback(lambda completed: _finish_run(run_id, cancel_event, completed))
+        tick = 0
+        while not future.done():
+            elapsed = round(time.time() - started, 1)
+            if cancel_event.is_set():
+                yield _json_line({"type": "cancelled", "message": "本次运行已停止。", "elapsed": elapsed, "run_id": run_id})
+                return
+            if tick == 0:
+                upload_note = f"，已附加 {len(uploaded_inputs)} 个文件" if uploaded_inputs else ""
+                message = f"agent 正在处理，请保持聊天页打开{upload_note}"
+            else:
+                message = f"agent 仍在运行，已耗时 {elapsed:.1f}s"
+            yield _json_line({"type": "status", "message": message, "elapsed": elapsed, "run_id": run_id})
+            tick += 1
+            time.sleep(1)
+        try:
+            result = future.result()
+        except Exception as exc:
+            yield _json_line({"type": "error", "message": str(exc), "run_id": run_id})
+            return
+        yield _json_line({"type": "result", "data": result.to_dict(), "run_id": run_id})
 
     return StreamingResponse(
         stream_events(),
@@ -211,6 +253,25 @@ def run_detail(run_id: str) -> dict[str, Any]:
     }
 
 
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run(run_id: str) -> dict[str, Any]:
+    cancel_event = RUN_CANCEL_EVENTS.get(run_id)
+    if cancel_event is None:
+        return {"ok": False, "runId": run_id, "running": False}
+    cancel_event.set()
+    return {"ok": True, "runId": run_id, "running": True}
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str) -> dict[str, Any]:
+    cancel_event = RUN_CANCEL_EVENTS.get(run_id)
+    if cancel_event is not None:
+        cancel_event.set()
+    run_root = _safe_run_root(run_id)
+    shutil.rmtree(run_root)
+    return {"ok": True, "runId": run_id}
+
+
 @app.get("/api/runs/{run_id}/artifact")
 def artifact(run_id: str, path: str) -> FileResponse:
     try:
@@ -220,6 +281,21 @@ def artifact(run_id: str, path: str) -> FileResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FileResponse(target, media_type="text/markdown", filename=target.name)
+
+
+def _new_run_id() -> str:
+    return time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+
+
+def _finish_run(run_id: str, cancel_event: threading.Event, completed: Any) -> None:
+    RUN_CANCEL_EVENTS.pop(run_id, None)
+    if cancel_event.is_set():
+        run_root = (WORKSPACE_ROOT / run_id).resolve()
+        try:
+            run_root.relative_to(WORKSPACE_ROOT.resolve())
+        except ValueError:
+            return
+        shutil.rmtree(run_root, ignore_errors=True)
 
 
 def _safe_run_root(run_id: str) -> Path:
