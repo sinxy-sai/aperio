@@ -16,7 +16,12 @@ Copy-Item aperio_agent_backend/.env.example aperio_agent_backend/.env
 DEEPSEEK_API_KEY=你的 key
 APERIO_ENGINE=deepagents
 APERIO_MODEL=openai:deepseek-v4-flash
+APERIO_FALLBACK_MODEL=
 APERIO_BASE_URL=https://api.deepseek.com
+APERIO_MODEL_CALL_LIMIT=100
+APERIO_TOOL_CALL_LIMIT=160
+APERIO_MODEL_MAX_RETRIES=3
+APERIO_TOOL_MAX_RETRIES=2
 APERIO_INSTALL_PROJECT_DEPS=0
 APERIO_SCAN_SANDBOX=host
 APERIO_ENABLE_MCP=0
@@ -49,6 +54,7 @@ aperio_agent_backend/workspace/<run_id>/
 - `APERIO_SCAN_SANDBOX=auto`：优先 Docker，失败后回退 host 扫描。
 - `APERIO_ENABLE_MCP=1`：启用包内 web search MCP；安装 `aperio-agent[mcp]` 后可用。
 - `AMAP_API_KEY=...`：在 MCP 开启时额外启用高德地图 MCP 工具。
+- `APERIO_FALLBACK_MODEL`、`APERIO_MODEL_CALL_LIMIT`、`APERIO_TOOL_CALL_LIMIT`、`APERIO_MODEL_MAX_RETRIES`、`APERIO_TOOL_MAX_RETRIES`：控制 DeepAgents 的模型降级、调用上限和重试策略。
 - CLI 交互模式 `aperio` 默认使用 prompt 审批；Web 端不能使用 prompt，只能选择 approve/reject。
 
 ## CLI

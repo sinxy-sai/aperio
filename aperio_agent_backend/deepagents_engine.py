@@ -6,10 +6,26 @@ from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+    ToolRetryMiddleware,
+)
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 
-from .config import get_api_key, get_base_url, get_model_name
+from .config import (
+    get_api_key,
+    get_base_url,
+    get_fallback_model_name,
+    get_model_call_limit,
+    get_model_max_retries,
+    get_model_name,
+    get_tool_call_limit,
+    get_tool_max_retries,
+)
 from .hitl import build_interrupt_policy, resolve_human_interrupts
 from .middleware import FinalOutputGuardMiddleware, RouterToolGuardMiddleware, ToolAllowlistMiddleware
 from .mcp_tools import load_mcp_tools
@@ -39,6 +55,7 @@ def run_deep_agent(
 
     backend = FilesystemBackend(root_dir=str(run_root), virtual_mode=True)
     model = _model()
+    fallback_model = _fallback_model()
     checkpointer = MemorySaver()
     telemetry = RunTelemetry()
     mcp_toolset = load_mcp_tools(run_root)
@@ -59,6 +76,7 @@ def run_deep_agent(
         permissions,
         interrupt_on,
         telemetry,
+        fallback_model,
         code_health_final_paths,
     )
     prd_agent = _compiled_prd_agent(
@@ -69,9 +87,10 @@ def run_deep_agent(
         interrupt_on,
         shared_tools,
         telemetry,
+        fallback_model,
         prd_review_final_paths,
     )
-    general_agent = _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, general_tools, telemetry)
+    general_agent = _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, general_tools, telemetry, fallback_model)
 
     router = create_deep_agent(
         model=model,
@@ -79,6 +98,7 @@ def run_deep_agent(
         backend=backend,
         checkpointer=checkpointer,
         middleware=[
+            *_runtime_middleware(fallback_model, retry_tools=set()),
             RouterToolGuardMiddleware(router_prompt),
             TelemetryMiddleware(telemetry, "aperio-router"),
         ],
@@ -132,6 +152,56 @@ def _model():
     )
 
 
+def _fallback_model():
+    fallback_name = get_fallback_model_name()
+    if not fallback_name or fallback_name == get_model_name():
+        return None
+    api_key = get_api_key()
+    if not api_key:
+        return None
+    return init_chat_model(
+        model=fallback_name,
+        api_key=api_key,
+        base_url=get_base_url(),
+    )
+
+
+def _runtime_middleware(fallback_model: Any | None, retry_tools: set[str] | None = None) -> list[Any]:
+    middleware: list[Any] = [
+        ModelCallLimitMiddleware(
+            run_limit=get_model_call_limit(),
+            exit_behavior="end",
+        ),
+        ModelRetryMiddleware(
+            max_retries=get_model_max_retries(),
+            initial_delay=1.0,
+            max_delay=8.0,
+            on_failure="error",
+        ),
+    ]
+    if fallback_model is not None:
+        middleware.append(ModelFallbackMiddleware(fallback_model))
+    if retry_tools is None:
+        retry_tools = {"read_file", "internet_search"}
+    if retry_tools:
+        middleware.append(
+            ToolRetryMiddleware(
+                tools=sorted(retry_tools),
+                max_retries=get_tool_max_retries(),
+                initial_delay=0.5,
+                max_delay=2.0,
+                on_failure="continue",
+            )
+        )
+    middleware.append(
+        ToolCallLimitMiddleware(
+            run_limit=get_tool_call_limit(),
+            exit_behavior="continue",
+        )
+    )
+    return middleware
+
+
 def _write_input_files(
     run_root: Path,
     message: str,
@@ -158,6 +228,7 @@ def _compiled_code_health_agent(
     permissions,
     interrupt_on,
     telemetry: RunTelemetry,
+    fallback_model: Any | None,
     completed_paths: set[str],
 ) -> dict[str, Any]:
     agent = create_deep_agent(
@@ -166,6 +237,7 @@ def _compiled_code_health_agent(
         backend=backend,
         checkpointer=checkpointer,
         middleware=[
+            *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
             ToolAllowlistMiddleware({"read_file", "write_file", "task", "write_todos"}, "code-health orchestrator"),
             FinalOutputGuardMiddleware(
                 {"/outputs/code_health/code_health_report.md"},
@@ -178,7 +250,7 @@ def _compiled_code_health_agent(
         interrupt_on=interrupt_on,
         skills=["/skills/code-health"],
         system_prompt=_code_health_prompt(),
-        subagents=_code_health_reviewers(telemetry, completed_paths),
+        subagents=_code_health_reviewers(telemetry, fallback_model, completed_paths),
         name="code-health-orchestrator",
     )
     return {
@@ -196,16 +268,19 @@ def _compiled_prd_agent(
     interrupt_on,
     web_tools: list[Any],
     telemetry: RunTelemetry,
+    fallback_model: Any | None,
     completed_paths: set[str],
 ) -> dict[str, Any]:
+    web_tool_names = {str(getattr(tool, "name", "")) for tool in web_tools}
     agent = create_deep_agent(
         model=model,
         tools=web_tools,
         backend=backend,
         checkpointer=checkpointer,
         middleware=[
+            *_runtime_middleware(fallback_model, retry_tools={"read_file", "internet_search", *web_tool_names}),
             ToolAllowlistMiddleware(
-                {"read_file", "write_file", "internet_search", "task", "write_todos"},
+                {"read_file", "write_file", "internet_search", "task", "write_todos", *web_tool_names},
                 "PRD review orchestrator",
             ),
             FinalOutputGuardMiddleware(
@@ -219,7 +294,7 @@ def _compiled_prd_agent(
         interrupt_on=interrupt_on,
         skills=["/skills/prd-review", "/skills/shared"],
         system_prompt=_prd_prompt(),
-        subagents=_prd_reviewers(web_tools, telemetry, completed_paths),
+        subagents=_prd_reviewers(web_tools, telemetry, fallback_model, completed_paths),
         name="prd-review-orchestrator",
     )
     return {
@@ -237,14 +312,17 @@ def _compiled_general_agent(
     interrupt_on,
     tools: list[Any],
     telemetry: RunTelemetry,
+    fallback_model: Any | None,
 ) -> dict[str, Any]:
+    tool_names = {str(getattr(tool, "name", "")) for tool in tools}
     agent = create_deep_agent(
         model=model,
         tools=tools,
         backend=backend,
         checkpointer=checkpointer,
         middleware=[
-            ToolAllowlistMiddleware({"read_file", *{str(getattr(tool, "name", "")) for tool in tools}}, "general-purpose"),
+            *_runtime_middleware(fallback_model, retry_tools={"read_file", *tool_names}),
+            ToolAllowlistMiddleware({"read_file", *tool_names}, "general-purpose"),
             TelemetryMiddleware(telemetry, "general-purpose"),
         ],
         permissions=permissions,
@@ -302,13 +380,18 @@ def _code_health_prompt() -> str:
 - 不要写 HTML、JSON 可视化或别名报告。"""
 
 
-def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -> list[dict[str, Any]]:
+def _code_health_reviewers(
+    telemetry: RunTelemetry,
+    fallback_model: Any | None,
+    completed_paths: set[str],
+) -> list[dict[str, Any]]:
     return [
         {
             "name": "architect",
             "description": "分析目录结构、模块边界、耦合、可维护性和代码坏味道。",
             "skills": ["/skills/code-health"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health architect"),
                 TelemetryMiddleware(telemetry, "code-health.architect"),
             ],
@@ -320,6 +403,7 @@ def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -
             "description": "分析安全风险、疑似密钥、Bandit/detect-secrets 结果和人工安全判断边界。",
             "skills": ["/skills/code-health"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health security analyst"),
                 TelemetryMiddleware(telemetry, "code-health.security-analyst"),
             ],
@@ -331,6 +415,7 @@ def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -
             "description": "分析依赖清单、pip-audit/deptry 覆盖、依赖安装限制和升级建议。",
             "skills": ["/skills/code-health"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health dependency checker"),
                 TelemetryMiddleware(telemetry, "code-health.dependency-checker"),
             ],
@@ -342,6 +427,7 @@ def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -
             "description": "分析 README、docstring、测试与文档覆盖限制。",
             "skills": ["/skills/code-health"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health doc reviewer"),
                 TelemetryMiddleware(telemetry, "code-health.doc-reviewer"),
             ],
@@ -353,6 +439,7 @@ def _code_health_reviewers(telemetry: RunTelemetry, completed_paths: set[str]) -
             "description": "合并四个代码健康草稿和工具结果，生成最终中文代码健康报告。",
             "skills": ["/skills/code-health"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health summarizer"),
                 FinalOutputGuardMiddleware(
                     {"/outputs/code_health/code_health_report.md"},
@@ -400,7 +487,12 @@ def _prd_prompt() -> str:
 - 不要创建 final_report.md、merged-report.md 或根目录别名文件。"""
 
 
-def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_paths: set[str]) -> list[dict[str, Any]]:
+def _prd_reviewers(
+    web_tools: list[Any],
+    telemetry: RunTelemetry,
+    fallback_model: Any | None,
+    completed_paths: set[str],
+) -> list[dict[str, Any]]:
     web_tool_names = {str(getattr(tool, "name", "")) for tool in web_tools}
     return [
         {
@@ -409,6 +501,7 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_path
             "skills": ["/skills/prd-review", "/skills/shared"],
             "tools": web_tools,
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file", "internet_search", *web_tool_names}),
                 ToolAllowlistMiddleware({"read_file", "write_file", "internet_search", *web_tool_names}, "PRD product strategist"),
                 TelemetryMiddleware(telemetry, "prd-review.product-strategist"),
             ],
@@ -421,6 +514,7 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_path
             "description": "从技术可行性、架构、集成、数据和实施复杂度视角评审 PRD。",
             "skills": ["/skills/prd-review"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD technical feasibility reviewer"),
                 TelemetryMiddleware(telemetry, "prd-review.technical-feasibility"),
             ],
@@ -432,6 +526,7 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_path
             "description": "从用户体验、用户流程、边界情况和可访问性视角评审 PRD。",
             "skills": ["/skills/prd-review"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD UX researcher"),
                 TelemetryMiddleware(telemetry, "prd-review.ux-researcher"),
             ],
@@ -443,6 +538,7 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_path
             "description": "从项目风险、隐私、安全、合规、资源和里程碑视角评审 PRD。",
             "skills": ["/skills/prd-review"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD risk analyst"),
                 TelemetryMiddleware(telemetry, "prd-review.risk-analyst"),
             ],
@@ -454,6 +550,7 @@ def _prd_reviewers(web_tools: list[Any], telemetry: RunTelemetry, completed_path
             "description": "合并 PRD 初稿和四个评审草稿，输出 PRD v2 与评审矩阵。",
             "skills": ["/skills/prd-review"],
             "middleware": [
+                *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD editor"),
                 FinalOutputGuardMiddleware(
                     {"/outputs/prd_review/prd_v2_final.md", "/outputs/prd_review/review_matrix.md"},

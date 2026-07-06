@@ -35,6 +35,10 @@ def get_model_name() -> str:
     ).strip()
 
 
+def get_fallback_model_name() -> str:
+    return os.environ.get("APERIO_FALLBACK_MODEL", "").strip()
+
+
 def get_base_url() -> str:
     return (
         os.environ.get("APERIO_BASE_URL")
@@ -66,3 +70,26 @@ def get_enable_mcp_tools() -> bool:
 
 def get_amap_api_key() -> str:
     return os.environ.get("AMAP_API_KEY", "").strip()
+
+
+def get_model_call_limit() -> int:
+    return _int_env("APERIO_MODEL_CALL_LIMIT", 100)
+
+
+def get_tool_call_limit() -> int:
+    return _int_env("APERIO_TOOL_CALL_LIMIT", 160)
+
+
+def get_model_max_retries() -> int:
+    return _int_env("APERIO_MODEL_MAX_RETRIES", 3)
+
+
+def get_tool_max_retries() -> int:
+    return _int_env("APERIO_TOOL_MAX_RETRIES", 2)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default)).strip()))
+    except ValueError:
+        return default

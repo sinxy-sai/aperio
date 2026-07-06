@@ -33,7 +33,12 @@ Edit `~/.aperio/.env`:
 DEEPSEEK_API_KEY=your-key
 APERIO_ENGINE=deepagents
 APERIO_MODEL=openai:deepseek-v4-flash
+APERIO_FALLBACK_MODEL=
 APERIO_BASE_URL=https://api.deepseek.com
+APERIO_MODEL_CALL_LIMIT=100
+APERIO_TOOL_CALL_LIMIT=160
+APERIO_MODEL_MAX_RETRIES=3
+APERIO_TOOL_MAX_RETRIES=2
 APERIO_INSTALL_PROJECT_DEPS=0
 APERIO_SCAN_SANDBOX=host
 APERIO_ENABLE_MCP=0
@@ -73,3 +78,5 @@ The default engine is `deepagents`, which runs a package-native DeepAgents route
 Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it scans on the host and does not install project dependencies. Set `APERIO_SCAN_SANDBOX=docker` to run the scanner in the packaged Docker sandbox, or `auto` to try Docker and fall back to host scanning.
 
 Optional MCP tools are disabled by default. Install `aperio-agent[mcp]`, set `APERIO_ENABLE_MCP=1`, and optionally set `AMAP_API_KEY` to enable public web search and Amap tools for agent workflows.
+
+DeepAgents runtime guards are enabled by default: model calls are capped, tool calls are capped, model calls retry before failing, and read/search tools retry transient failures. Use `APERIO_FALLBACK_MODEL` to enable model fallback.
