@@ -804,6 +804,9 @@ def _execute_requires_approval(request) -> bool:
 
 
 def handle_human_approval(agent, response, config: dict, label: str):
+    hitl_mode = os.environ.get("APERIO_HITL_MODE", "prompt").strip().lower()
+    if hitl_mode not in {"prompt", "approve", "reject"}:
+        hitl_mode = "prompt"
     print(f"[debug] {label} response_type={type(response).__name__} interrupts={len(getattr(response, 'interrupts', []) or [])}")
     while hasattr(response, "interrupts") and response.interrupts:
         resume_map = {}
@@ -820,8 +823,12 @@ def handle_human_approval(agent, response, config: dict, label: str):
                     print(f"     文件: {file_path}")
                     content = action['args'].get('content', '')
                     print(f"     内容: {str(content)[:200]}...")
-                choice = input("  [a]pprove / [r]eject: ").strip().lower()
-                approved = _is_approval_choice(choice)
+                if hitl_mode == "prompt":
+                    choice = input("  [a]pprove / [r]eject: ").strip().lower()
+                    approved = _is_approval_choice(choice)
+                else:
+                    approved = hitl_mode == "approve"
+                    print(f"  [web] auto-{hitl_mode}")
                 decisions.append({
                     "action_id": action.get("id"),
                     "tool_name": action["name"],

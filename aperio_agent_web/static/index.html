@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aperio Agent Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="sidebar" aria-label="Navigation">
+        <div class="brand">
+          <div class="brand-mark">A</div>
+          <div>
+            <h1>Aperio</h1>
+            <p>Agent Workbench</p>
+          </div>
+        </div>
+
+        <button class="nav-primary" id="newChatBtn" type="button">新对话</button>
+
+        <div class="nav-section">
+          <p>快捷任务</p>
+          <button data-example="我在珠海，明天天气如何？要带伞吗？">天气问答</button>
+          <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。它是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，同时提供校园活动推荐和实时拥挤度信息。">PRD 评审</button>
+          <button data-example="对当前项目做一次代码健康检查。">代码体检</button>
+        </div>
+
+        <div class="nav-section muted-list">
+          <p>最近</p>
+          <span>智慧校园 PRD</span>
+          <span>代码健康检查</span>
+          <span>天气与出行建议</span>
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="Chat workspace">
+        <div class="topbar">
+          <button class="icon-button rail-toggle" id="railToggle" type="button" aria-label="折叠侧栏">☰</button>
+          <div>
+            <h2>新对话</h2>
+            <p class="top-hint">AI 生成内容请谨慎核实</p>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" id="artifactToggle" type="button" aria-label="打开产物面板">▣</button>
+            <button class="icon-button" id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsPanel">⚙</button>
+            <button class="ghost" id="clearBtn" type="button">清空</button>
+          </div>
+          <div class="settings-panel" id="settingsPanel" hidden>
+            <label for="approvalMode">审批模式</label>
+            <select id="approvalMode">
+              <option value="approve" selected>自动批准</option>
+              <option value="reject">自动拒绝</option>
+            </select>
+            <label for="timeoutSeconds">超时秒数</label>
+            <input id="timeoutSeconds" type="number" min="30" max="3600" value="900" />
+          </div>
+        </div>
+
+        <div class="conversation" id="conversation">
+          <div class="welcome" id="welcomePanel">
+            <h2>有什么我能帮你的吗？</h2>
+            <div class="suggestions">
+              <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。">写 PRD 并评审</button>
+              <button data-example="对当前项目做一次代码健康检查。">检查代码健康</button>
+              <button data-example="我在珠海，明天天气如何？要带伞吗？">查询天气建议</button>
+            </div>
+          </div>
+          <article class="message assistant">
+            <div class="avatar">AI</div>
+            <div class="bubble">
+              <p>输入一个任务，我会调用本地 Aperio agent，并在完成后展示回答、运行目录和产物预览。</p>
+            </div>
+          </article>
+        </div>
+
+        <form class="composer" id="chatForm">
+          <div class="composer-status">
+            <span class="status-dot" id="statusDot"></span>
+            <strong id="statusText">连接中</strong>
+            <span id="statusDetail">检查本地服务</span>
+          </div>
+          <textarea id="messageInput" rows="4" placeholder="例如：为智慧校园导航助手写 PRD 并评审"></textarea>
+          <div class="composer-actions">
+            <span id="runMeta">等待任务</span>
+            <button id="sendBtn" type="submit">运行</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="artifacts" id="artifactPanel" aria-label="Artifacts">
+        <div class="artifact-head">
+          <div>
+            <p class="eyebrow">Outputs</p>
+            <h2>产物</h2>
+          </div>
+          <div class="artifact-actions">
+            <span id="runId">未运行</span>
+            <button class="icon-button" id="artifactClose" type="button" aria-label="收起产物面板">›</button>
+          </div>
+        </div>
+        <div id="artifactList" class="artifact-list">
+          <div class="empty-state">完成一次任务后，这里会显示 Markdown 报告和性能文件。</div>
+        </div>
+      </aside>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
