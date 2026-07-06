@@ -36,6 +36,37 @@ const ACTIVE_SESSION_KEY = "aperio.chat.activeSession";
 let chatSessions = [];
 let activeSessionId = "";
 
+function assignIcon(selector, name, root = document) {
+  const element = root.querySelector(selector);
+  if (!element) return;
+  element.textContent = "";
+  element.setAttribute("data-lucide", name);
+}
+
+function renderLucideIcons(root = document) {
+  assignIcon("#newChatBtn .nav-icon", "plus", root);
+  assignIcon(".nav-link .nav-icon", "activity", root);
+  assignIcon(".nav-section:not(.muted-list) button:nth-of-type(1) .nav-icon", "cloud-sun", root);
+  assignIcon(".nav-section:not(.muted-list) button:nth-of-type(2) .nav-icon", "file-text", root);
+  assignIcon(".nav-section:not(.muted-list) button:nth-of-type(3) .nav-icon", "code-xml", root);
+  assignIcon("#railToggle span", "menu", root);
+  assignIcon("#artifactToggle span", "panel-right", root);
+  assignIcon("#settingsToggle span", "settings", root);
+  assignIcon("#observeRefresh span", "refresh-cw", root);
+  assignIcon("#artifactClose span", "chevron-right", root);
+  assignIcon("#welcomePanel .suggestions button:nth-child(1) span", "file-text", root);
+  assignIcon("#welcomePanel .suggestions button:nth-child(2) span", "code-xml", root);
+  assignIcon("#welcomePanel .suggestions button:nth-child(3) span", "cloud-sun", root);
+  if (window.lucide) {
+    window.lucide.createIcons({
+      attrs: {
+        "stroke-width": 2,
+        "aria-hidden": "true",
+      },
+    });
+  }
+}
+
 function loadStoredSessions() {
   try {
     const stored = JSON.parse(localStorage.getItem(SESSION_STORE_KEY) || "[]");
@@ -159,6 +190,7 @@ function initializeSession() {
   selectedRunId = session.runId || "";
   renderSessionMessages(session);
   renderRecentSessions();
+  renderLucideIcons();
 }
 
 function hideWelcome() {
@@ -195,6 +227,7 @@ function resetConversation() {
     </article>
   `;
   bindExampleButtons(conversation);
+  renderLucideIcons(conversation);
 }
 
 function setStatus(kind, text, detail) {

@@ -172,6 +172,23 @@ h1 {
   font-size: 16px;
 }
 
+.lucide {
+  flex: 0 0 auto;
+  stroke: currentColor;
+}
+
+.nav-icon.lucide {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.icon-button .lucide,
+.suggestions .lucide {
+  width: 18px;
+  height: 18px;
+}
+
 .muted-list span {
   display: block;
   overflow: hidden;

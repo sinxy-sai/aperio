@@ -1,0 +1,25 @@
+{
+  "name": "aperio-agent-web-assets",
+  "version": "0.1.0",
+  "description": "Frontend asset dependencies for Aperio Agent Web",
+  "private": true,
+  "scripts": {
+    "sync:lucide": "node scripts/sync-lucide.mjs",
+    "check:frontend": "node --check aperio_agent_web/static/app.js && node --check aperio_agent_web/static/observability.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sinxy-sai/aperio.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/sinxy-sai/aperio/issues"
+  },
+  "homepage": "https://github.com/sinxy-sai/aperio#readme",
+  "dependencies": {
+    "lucide": "^1.23.0"
+  }
+}

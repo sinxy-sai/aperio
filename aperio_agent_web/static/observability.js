@@ -21,6 +21,31 @@ if (returnChatLink && selectedSessionId) {
   returnChatLink.href = `/?session=${encodeURIComponent(selectedSessionId)}`;
 }
 
+function iconMarkup(name) {
+  return `<i data-lucide="${name}" aria-hidden="true"></i>`;
+}
+
+function renderLucideIcons() {
+  if (window.lucide) {
+    window.lucide.createIcons({
+      attrs: {
+        "stroke-width": 2,
+        "aria-hidden": "true",
+      },
+    });
+  }
+}
+
+function setupStaticIcons() {
+  if (returnChatLink) {
+    returnChatLink.innerHTML = `${iconMarkup("arrow-left")}<span>返回聊天</span>`;
+  }
+  if (refreshBtn) {
+    refreshBtn.innerHTML = `${iconMarkup("refresh-cw")}<span>刷新</span>`;
+  }
+  renderLucideIcons();
+}
+
 function setupCollapsibleSurfaces() {
   document.querySelectorAll(".surface").forEach((surface) => {
     const head = surface.querySelector(".surface-head");
@@ -29,14 +54,16 @@ function setupCollapsibleSurfaces() {
     button.type = "button";
     button.className = "collapse-button";
     button.setAttribute("aria-label", "收纳面板");
-    button.textContent = "−";
+    button.innerHTML = iconMarkup("minus");
     button.addEventListener("click", () => {
       const collapsed = surface.classList.toggle("collapsed");
-      button.textContent = collapsed ? "+" : "−";
+      button.innerHTML = iconMarkup(collapsed ? "plus" : "minus");
       button.setAttribute("aria-label", collapsed ? "展开面板" : "收纳面板");
+      renderLucideIcons();
     });
     head.append(button);
   });
+  renderLucideIcons();
 }
 
 function escapeHtml(value) {
@@ -351,6 +378,7 @@ routeFilter.addEventListener("change", () => {
   }
 });
 
+setupStaticIcons();
 loadHealth();
 setupCollapsibleSurfaces();
 loadRuns();

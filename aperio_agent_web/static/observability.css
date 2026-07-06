@@ -105,10 +105,11 @@ p {
 }
 
 .ghost-link {
-  display: inline-grid;
+  display: inline-flex;
   width: fit-content;
   height: 38px;
-  place-items: center;
+  align-items: center;
+  gap: 8px;
   border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--ink);
@@ -134,9 +135,20 @@ p {
 }
 
 .rail-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   color: #fff;
   background: var(--green);
   font-weight: 800;
+}
+
+.lucide {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
 }
 
 .rail-tools select {
@@ -336,6 +348,11 @@ p {
   color: var(--ink);
   background: #fbfbfc;
   font-weight: 900;
+}
+
+.collapse-button .lucide {
+  width: 15px;
+  height: 15px;
 }
 
 .agent-grid,
