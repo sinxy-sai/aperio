@@ -17,13 +17,25 @@
           </div>
         </div>
 
-        <button class="nav-primary" id="newChatBtn" type="button">新对话</button>
+        <button class="nav-primary" id="newChatBtn" type="button">
+          <span class="nav-icon" aria-hidden="true">＋</span>
+          <span>新对话</span>
+        </button>
 
         <div class="nav-section">
           <p>快捷任务</p>
-          <button data-example="我在珠海，明天天气如何？要带伞吗？">天气问答</button>
-          <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。它是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，同时提供校园活动推荐和实时拥挤度信息。">PRD 评审</button>
-          <button data-example="对当前项目做一次代码健康检查。">代码体检</button>
+          <button data-example="我在珠海，明天天气如何？要带伞吗？">
+            <span class="nav-icon" aria-hidden="true">☁</span>
+            <span>天气问答</span>
+          </button>
+          <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。它是一款基于 AR/语音的校内导航 App，帮助新生和访客快速找到教室和设施，同时提供校园活动推荐和实时拥挤度信息。">
+            <span class="nav-icon" aria-hidden="true">□</span>
+            <span>PRD 评审</span>
+          </button>
+          <button data-example="对当前项目做一次代码健康检查。">
+            <span class="nav-icon" aria-hidden="true">⌁</span>
+            <span>代码体检</span>
+          </button>
         </div>
 
         <div class="nav-section muted-list">
@@ -36,14 +48,20 @@
 
       <section class="workspace" aria-label="Chat workspace">
         <div class="topbar">
-          <button class="icon-button rail-toggle" id="railToggle" type="button" aria-label="折叠侧栏">☰</button>
+          <button class="icon-button rail-toggle" id="railToggle" type="button" aria-label="折叠侧栏">
+            <span aria-hidden="true">☰</span>
+          </button>
           <div>
             <h2>新对话</h2>
             <p class="top-hint">AI 生成内容请谨慎核实</p>
           </div>
           <div class="top-actions">
-            <button class="icon-button" id="artifactToggle" type="button" aria-label="打开产物面板">▣</button>
-            <button class="icon-button" id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsPanel">⚙</button>
+            <button class="icon-button" id="artifactToggle" type="button" aria-label="打开产物面板">
+              <span aria-hidden="true">▣</span>
+            </button>
+            <button class="icon-button" id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsPanel">
+              <span aria-hidden="true">⚙</span>
+            </button>
             <button class="ghost" id="clearBtn" type="button">清空</button>
           </div>
           <div class="settings-panel" id="settingsPanel" hidden>
@@ -61,9 +79,18 @@
           <div class="welcome" id="welcomePanel">
             <h2>有什么我能帮你的吗？</h2>
             <div class="suggestions">
-              <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。">写 PRD 并评审</button>
-              <button data-example="对当前项目做一次代码健康检查。">检查代码健康</button>
-              <button data-example="我在珠海，明天天气如何？要带伞吗？">查询天气建议</button>
+              <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。">
+                <span aria-hidden="true">□</span>
+                写 PRD 并评审
+              </button>
+              <button data-example="对当前项目做一次代码健康检查。">
+                <span aria-hidden="true">⌁</span>
+                检查代码健康
+              </button>
+              <button data-example="我在珠海，明天天气如何？要带伞吗？">
+                <span aria-hidden="true">☁</span>
+                查询天气建议
+              </button>
             </div>
           </div>
           <article class="message assistant">
@@ -96,7 +123,9 @@
           </div>
           <div class="artifact-actions">
             <span id="runId">未运行</span>
-            <button class="icon-button" id="artifactClose" type="button" aria-label="收起产物面板">›</button>
+            <button class="icon-button" id="artifactClose" type="button" aria-label="收起产物面板">
+              <span aria-hidden="true">›</span>
+            </button>
           </div>
         </div>
         <div id="artifactList" class="artifact-list">

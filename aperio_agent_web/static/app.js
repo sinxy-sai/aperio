@@ -31,9 +31,18 @@ function resetConversation() {
     <div class="welcome" id="welcomePanel">
       <h2>有什么我能帮你的吗？</h2>
       <div class="suggestions">
-        <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。">写 PRD 并评审</button>
-        <button data-example="对当前项目做一次代码健康检查。">检查代码健康</button>
-        <button data-example="我在珠海，明天天气如何？要带伞吗？">查询天气建议</button>
+        <button data-example="为「智慧校园导航助手」写一份 PRD 并评审。">
+          <span aria-hidden="true">□</span>
+          写 PRD 并评审
+        </button>
+        <button data-example="对当前项目做一次代码健康检查。">
+          <span aria-hidden="true">⌁</span>
+          检查代码健康
+        </button>
+        <button data-example="我在珠海，明天天气如何？要带伞吗？">
+          <span aria-hidden="true">☁</span>
+          查询天气建议
+        </button>
       </div>
     </div>
     <article class="message assistant">
