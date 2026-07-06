@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
-from deepagents.backends import FilesystemBackend
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from deepagents.backends.store import StoreBackend
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ModelFallbackMiddleware,
@@ -14,6 +15,7 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
 )
 from langchain.chat_models import init_chat_model
+from langgraph.store.memory import InMemoryStore
 from langgraph.checkpoint.memory import MemorySaver
 
 from .config import (
@@ -32,6 +34,7 @@ from .mcp_tools import load_mcp_tools
 from .observability import RunTelemetry, TelemetryMiddleware
 from .policy import write_local_policy
 from .resources import copy_packaged_skills
+from .skill_backend import AgentSkillBackend, AgentSkillSources
 
 
 def run_deep_agent(
@@ -49,11 +52,24 @@ def run_deep_agent(
     evidence, PRD review outputs, and a pure routing agent.
     """
     run_root.mkdir(parents=True, exist_ok=True)
-    copy_packaged_skills(run_root)
+    skills_root = copy_packaged_skills(run_root)
     _write_input_files(run_root, message, input_bundle, code_scan_summary)
     write_local_policy(run_root, input_bundle)
 
-    backend = FilesystemBackend(root_dir=str(run_root), virtual_mode=True)
+    skill_sources = AgentSkillSources(skills_root)
+    store = InMemoryStore()
+    backend = CompositeBackend(
+        default=FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
+        routes={
+            "/inputs/": FilesystemBackend(root_dir=str(run_root / "inputs"), virtual_mode=True),
+            "/outputs/": FilesystemBackend(root_dir=str(run_root / "outputs"), virtual_mode=True),
+            "/local-resources/": FilesystemBackend(root_dir=str(run_root / "local-resources"), virtual_mode=True),
+            "/skills/": FilesystemBackend(root_dir=str(skills_root), virtual_mode=True),
+            "/agent-skills/": AgentSkillBackend(skill_sources),
+            "/memories/": StoreBackend(store=store, namespace=lambda _runtime: ("aperio",)),
+            "/temp/": StateBackend(),
+        },
+    )
     model = _model()
     fallback_model = _fallback_model()
     checkpointer = MemorySaver()
@@ -66,7 +82,10 @@ def run_deep_agent(
     code_health_final_paths: set[str] = set()
     prd_review_final_paths: set[str] = set()
     permissions = [
-        FilesystemPermission(operations=["read", "write"], paths=["/*"], mode="allow"),
+        FilesystemPermission(operations=["write"], paths=["/inputs/**"], mode="deny"),
+        FilesystemPermission(operations=["write"], paths=["/local-resources/**"], mode="deny"),
+        FilesystemPermission(operations=["write"], paths=["/skills/**"], mode="deny"),
+        FilesystemPermission(operations=["write"], paths=["/agent-skills/**"], mode="deny"),
     ]
 
     code_health_agent = _compiled_code_health_agent(
@@ -76,6 +95,7 @@ def run_deep_agent(
         permissions,
         interrupt_on,
         telemetry,
+        skill_sources,
         fallback_model,
         code_health_final_paths,
     )
@@ -87,10 +107,21 @@ def run_deep_agent(
         interrupt_on,
         shared_tools,
         telemetry,
+        skill_sources,
         fallback_model,
         prd_review_final_paths,
     )
-    general_agent = _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, general_tools, telemetry, fallback_model)
+    general_agent = _compiled_general_agent(
+        model,
+        backend,
+        checkpointer,
+        permissions,
+        interrupt_on,
+        general_tools,
+        telemetry,
+        skill_sources,
+        fallback_model,
+    )
 
     router = create_deep_agent(
         model=model,
@@ -228,6 +259,7 @@ def _compiled_code_health_agent(
     permissions,
     interrupt_on,
     telemetry: RunTelemetry,
+    skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
 ) -> dict[str, Any]:
@@ -248,9 +280,9 @@ def _compiled_code_health_agent(
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
-        skills=["/skills/code-health"],
+        skills=skill_sources.source("code-health-orchestrator", "code-health/code-health-toolkit"),
         system_prompt=_code_health_prompt(),
-        subagents=_code_health_reviewers(telemetry, fallback_model, completed_paths),
+        subagents=_code_health_reviewers(telemetry, skill_sources, fallback_model, completed_paths),
         name="code-health-orchestrator",
     )
     return {
@@ -268,6 +300,7 @@ def _compiled_prd_agent(
     interrupt_on,
     web_tools: list[Any],
     telemetry: RunTelemetry,
+    skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
 ) -> dict[str, Any]:
@@ -292,9 +325,13 @@ def _compiled_prd_agent(
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
-        skills=["/skills/prd-review", "/skills/shared"],
+        skills=skill_sources.source(
+            "prd-review-orchestrator",
+            "prd-review/prd-writing",
+            "shared/web-search",
+        ),
         system_prompt=_prd_prompt(),
-        subagents=_prd_reviewers(web_tools, telemetry, fallback_model, completed_paths),
+        subagents=_prd_reviewers(web_tools, telemetry, skill_sources, fallback_model, completed_paths),
         name="prd-review-orchestrator",
     )
     return {
@@ -312,6 +349,7 @@ def _compiled_general_agent(
     interrupt_on,
     tools: list[Any],
     telemetry: RunTelemetry,
+    skill_sources: AgentSkillSources,
     fallback_model: Any | None,
 ) -> dict[str, Any]:
     tool_names = {str(getattr(tool, "name", "")) for tool in tools}
@@ -327,7 +365,7 @@ def _compiled_general_agent(
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
-        skills=["/skills/shared"],
+        skills=skill_sources.source("general-purpose", "shared/web-search"),
         system_prompt=_general_prompt(),
         name="general-purpose",
     )
@@ -382,6 +420,7 @@ def _code_health_prompt() -> str:
 
 def _code_health_reviewers(
     telemetry: RunTelemetry,
+    skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
 ) -> list[dict[str, Any]]:
@@ -389,7 +428,7 @@ def _code_health_reviewers(
         {
             "name": "architect",
             "description": "分析目录结构、模块边界、耦合、可维护性和代码坏味道。",
-            "skills": ["/skills/code-health"],
+            "skills": skill_sources.source("architect", "code-health/code-architect"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health architect"),
@@ -401,7 +440,7 @@ def _code_health_reviewers(
         {
             "name": "security-analyst",
             "description": "分析安全风险、疑似密钥、Bandit/detect-secrets 结果和人工安全判断边界。",
-            "skills": ["/skills/code-health"],
+            "skills": skill_sources.source("security-analyst", "code-health/code-security"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health security analyst"),
@@ -413,7 +452,7 @@ def _code_health_reviewers(
         {
             "name": "dependency-checker",
             "description": "分析依赖清单、pip-audit/deptry 覆盖、依赖安装限制和升级建议。",
-            "skills": ["/skills/code-health"],
+            "skills": skill_sources.source("dependency-checker", "code-health/code-dependency"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health dependency checker"),
@@ -425,7 +464,7 @@ def _code_health_reviewers(
         {
             "name": "doc-reviewer",
             "description": "分析 README、docstring、测试与文档覆盖限制。",
-            "skills": ["/skills/code-health"],
+            "skills": skill_sources.source("doc-reviewer", "code-health/code-documentation"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health doc reviewer"),
@@ -437,7 +476,7 @@ def _code_health_reviewers(
         {
             "name": "summarizer",
             "description": "合并四个代码健康草稿和工具结果，生成最终中文代码健康报告。",
-            "skills": ["/skills/code-health"],
+            "skills": skill_sources.source("code-health-summarizer", "code-health/report-writing-code-health"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health summarizer"),
@@ -490,6 +529,7 @@ def _prd_prompt() -> str:
 def _prd_reviewers(
     web_tools: list[Any],
     telemetry: RunTelemetry,
+    skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
 ) -> list[dict[str, Any]]:
@@ -498,7 +538,7 @@ def _prd_reviewers(
         {
             "name": "product-strategist",
             "description": "从产品策略、价值、范围和运营视角评审 PRD。",
-            "skills": ["/skills/prd-review", "/skills/shared"],
+            "skills": skill_sources.source("product-strategist", "prd-review/review-ops", "shared/web-search"),
             "tools": web_tools,
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file", "internet_search", *web_tool_names}),
@@ -512,7 +552,7 @@ def _prd_reviewers(
         {
             "name": "technical-feasibility",
             "description": "从技术可行性、架构、集成、数据和实施复杂度视角评审 PRD。",
-            "skills": ["/skills/prd-review"],
+            "skills": skill_sources.source("technical-feasibility", "prd-review/review-tech"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD technical feasibility reviewer"),
@@ -524,7 +564,7 @@ def _prd_reviewers(
         {
             "name": "ux-researcher",
             "description": "从用户体验、用户流程、边界情况和可访问性视角评审 PRD。",
-            "skills": ["/skills/prd-review"],
+            "skills": skill_sources.source("ux-researcher", "prd-review/review-ux"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD UX researcher"),
@@ -536,7 +576,7 @@ def _prd_reviewers(
         {
             "name": "risk-analyst",
             "description": "从项目风险、隐私、安全、合规、资源和里程碑视角评审 PRD。",
-            "skills": ["/skills/prd-review"],
+            "skills": skill_sources.source("risk-analyst", "prd-review/review-risk"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD risk analyst"),
@@ -548,7 +588,7 @@ def _prd_reviewers(
         {
             "name": "editor",
             "description": "合并 PRD 初稿和四个评审草稿，输出 PRD v2 与评审矩阵。",
-            "skills": ["/skills/prd-review"],
+            "skills": skill_sources.source("prd-editor", "prd-review/report-writing-prd", "prd-review/review-matrix"),
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD editor"),

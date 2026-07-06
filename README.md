@@ -77,6 +77,8 @@ The default engine is `deepagents`, which runs a package-native DeepAgents route
 
 Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it scans on the host and does not install project dependencies. Set `APERIO_SCAN_SANDBOX=docker` to run the scanner in the packaged Docker sandbox, or `auto` to try Docker and fall back to host scanning.
 
+DeepAgents runs on a routed workspace backend. Inputs, outputs, local policy files, packaged skills, per-agent skill views, memory, and temp state are separated by virtual paths, and each subagent receives only its assigned read-only skill source.
+
 Optional MCP tools are disabled by default. Install `aperio-agent[mcp]`, set `APERIO_ENABLE_MCP=1`, and optionally set `AMAP_API_KEY` to enable public web search and Amap tools for agent workflows.
 
 DeepAgents runtime guards are enabled by default: model calls are capped, tool calls are capped, model calls retry before failing, and read/search tools retry transient failures. Use `APERIO_FALLBACK_MODEL` to enable model fallback.
