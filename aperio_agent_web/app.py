@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,11 +22,14 @@ from aperio_agent_backend.config import (
     get_model_name,
     get_scan_sandbox_mode,
 )
-from aperio_agent_backend.runner import read_artifacts, run_agent, safe_artifact_path
+from aperio_agent_backend.runner import UploadedInput, read_artifacts, run_agent, safe_artifact_path
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 REACT_INDEX = STATIC_DIR / "react" / "index.html"
+MAX_UPLOAD_FILES = 80
+MAX_UPLOAD_BYTES = 80 * 1024 * 1024
+MAX_SINGLE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 class ChatRequest(BaseModel):
@@ -70,27 +73,22 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest) -> dict[str, Any]:
-    approval_mode = request.approval_mode.strip().lower()
-    if approval_mode not in {"prompt", "approve", "reject"}:
-        raise HTTPException(status_code=400, detail="approval_mode must be prompt, approve, or reject")
-    if approval_mode == "prompt":
-        raise HTTPException(status_code=400, detail="Web requests cannot use prompt approval mode")
+async def chat(request: Request) -> dict[str, Any]:
+    chat_request, uploaded_inputs = await _parse_chat_request(request)
+    approval_mode = _validate_approval_mode(chat_request.approval_mode)
     result = run_agent(
-        message=request.message,
+        message=chat_request.message,
         approval_mode=approval_mode,
-        timeout_seconds=request.timeout_seconds,
+        timeout_seconds=chat_request.timeout_seconds,
+        uploaded_inputs=uploaded_inputs,
     )
     return result.to_dict()
 
 
 @app.post("/api/chat/stream")
-def chat_stream(request: ChatRequest) -> StreamingResponse:
-    approval_mode = request.approval_mode.strip().lower()
-    if approval_mode not in {"prompt", "approve", "reject"}:
-        raise HTTPException(status_code=400, detail="approval_mode must be prompt, approve, or reject")
-    if approval_mode == "prompt":
-        raise HTTPException(status_code=400, detail="Web requests cannot use prompt approval mode")
+async def chat_stream(request: Request) -> StreamingResponse:
+    chat_request, uploaded_inputs = await _parse_chat_request(request)
+    approval_mode = _validate_approval_mode(chat_request.approval_mode)
 
     def stream_events():
         started = time.time()
@@ -98,15 +96,17 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 run_agent,
-                request.message,
+                chat_request.message,
                 approval_mode,
-                request.timeout_seconds,
+                chat_request.timeout_seconds,
+                uploaded_inputs,
             )
             tick = 0
             while not future.done():
                 elapsed = round(time.time() - started, 1)
                 if tick == 0:
-                    message = "agent 正在处理，请保持聊天页打开；观测平台会在新标签页显示"
+                    upload_note = f"，已附加 {len(uploaded_inputs)} 个文件" if uploaded_inputs else ""
+                    message = f"agent 正在处理，请保持聊天页打开{upload_note}"
                 else:
                     message = f"agent 仍在运行，已耗时 {elapsed:.1f}s"
                 yield _json_line({"type": "status", "message": message, "elapsed": elapsed})
@@ -240,6 +240,56 @@ def _read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"error": "invalid JSON"}
+
+
+async def _parse_chat_request(request: Request) -> tuple[ChatRequest, list[UploadedInput]]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        chat_request = ChatRequest(
+            message=str(form.get("message") or ""),
+            approval_mode=str(form.get("approval_mode") or "approve"),
+            timeout_seconds=int(form.get("timeout_seconds") or 900),
+        )
+        files = form.getlist("files")
+        paths = [str(item) for item in form.getlist("paths")]
+        uploaded_inputs: list[UploadedInput] = []
+        total_bytes = 0
+
+        if len(files) > MAX_UPLOAD_FILES:
+            raise HTTPException(status_code=413, detail=f"最多支持上传 {MAX_UPLOAD_FILES} 个文件")
+
+        for index, upload in enumerate(files):
+            if not hasattr(upload, "read"):
+                continue
+            content = await upload.read()
+            if len(content) > MAX_SINGLE_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"单个文件不能超过 {MAX_SINGLE_UPLOAD_BYTES // 1024 // 1024}MB")
+            total_bytes += len(content)
+            if total_bytes > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"总上传大小不能超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
+
+            filename = str(getattr(upload, "filename", "") or f"upload-{index + 1}")
+            uploaded_inputs.append(
+                UploadedInput(
+                    filename=filename,
+                    relative_path=paths[index] if index < len(paths) else filename,
+                    content_type=str(getattr(upload, "content_type", "") or "application/octet-stream"),
+                    content=content,
+                )
+            )
+        return chat_request, uploaded_inputs
+
+    return ChatRequest.model_validate(await request.json()), []
+
+
+def _validate_approval_mode(value: str) -> str:
+    approval_mode = value.strip().lower()
+    if approval_mode not in {"prompt", "approve", "reject"}:
+        raise HTTPException(status_code=400, detail="approval_mode must be prompt, approve, or reject")
+    if approval_mode == "prompt":
+        raise HTTPException(status_code=400, detail="Web requests cannot use prompt approval mode")
+    return approval_mode
 
 
 def _json_line(payload: dict[str, Any]) -> str:

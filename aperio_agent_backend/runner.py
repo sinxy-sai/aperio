@@ -73,7 +73,20 @@ class AgentRunResult:
         return data
 
 
-def run_agent(message: str, approval_mode: str = "approve", timeout_seconds: int = 900) -> AgentRunResult:
+@dataclass
+class UploadedInput:
+    filename: str
+    relative_path: str
+    content_type: str
+    content: bytes
+
+
+def run_agent(
+    message: str,
+    approval_mode: str = "approve",
+    timeout_seconds: int = 900,
+    uploaded_inputs: list[UploadedInput] | None = None,
+) -> AgentRunResult:
     started = time.time()
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     run_root = WORKSPACE_ROOT / run_id
@@ -82,6 +95,7 @@ def run_agent(message: str, approval_mode: str = "approve", timeout_seconds: int
     try:
         route = _route_task(message)
         code_project_path, code_target_rel, code_target_path, code_context_found = resolve_code_context(message)
+        uploaded_metadata = _write_uploaded_inputs(run_root, uploaded_inputs or [])
         input_bundle = build_input_bundle(
             run_id=run_id,
             task_text=message,
@@ -89,7 +103,21 @@ def run_agent(message: str, approval_mode: str = "approve", timeout_seconds: int
             code_target_rel=code_target_rel,
             code_target_path=code_target_path,
             code_context_found=code_context_found,
+            uploaded_attachments=uploaded_metadata,
         )
+        if _should_return_binary_upload_limitation(route, uploaded_metadata):
+            _write_input_files_for_run(run_root, message, input_bundle)
+            answer = _binary_upload_limitation_answer(message, uploaded_metadata)
+            _write_performance(run_root, started, route, ok=True)
+            return AgentRunResult(
+                ok=True,
+                return_code=0,
+                duration_seconds=round(time.time() - started, 1),
+                answer=answer,
+                run_id=run_id,
+                artifacts=_read_artifacts(run_root),
+                route=route,
+            )
 
         scan_summary: dict[str, Any] | None = None
         if route == "code_health":
@@ -204,8 +232,9 @@ def build_input_bundle(
     code_target_rel: str,
     code_target_path: Path,
     code_context_found: bool,
+    uploaded_attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    attachments: list[dict[str, Any]] = []
+    attachments: list[dict[str, Any]] = list(uploaded_attachments or [])
     if code_context_found:
         attachments.append(
             {
@@ -234,6 +263,7 @@ def build_input_bundle(
         ],
         "runtime_context": {
             "inputs": "/inputs",
+            "uploads": "/inputs/uploads",
             "outputs": "/outputs",
             "skills": "/skills",
             "code_health_raw_results": "/outputs/code_health/raw/tool_results.json",
@@ -244,6 +274,118 @@ def build_input_bundle(
             "demo_runtime_dependency": False,
         },
     }
+
+
+def _write_uploaded_inputs(run_root: Path, uploaded_inputs: list[UploadedInput]) -> list[dict[str, Any]]:
+    if not uploaded_inputs:
+        return []
+
+    upload_root = run_root / "inputs" / "uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    metadata: list[dict[str, Any]] = []
+    used_paths: set[str] = set()
+
+    for index, item in enumerate(uploaded_inputs, start=1):
+        rel_path = _safe_upload_path(item.relative_path or item.filename or f"upload-{index}")
+        if not rel_path:
+            rel_path = f"upload-{index}"
+        rel_path = _deduplicate_upload_path(rel_path, used_paths)
+        used_paths.add(rel_path)
+
+        target = (upload_root / rel_path).resolve()
+        try:
+            target.relative_to(upload_root.resolve())
+        except ValueError:
+            rel_path = f"upload-{index}-{Path(item.filename or 'file').name}"
+            target = (upload_root / _safe_upload_path(rel_path)).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(item.content)
+
+        metadata.append(
+            {
+                "id": f"upload_{index}",
+                "type": "uploaded_file",
+                "filename": item.filename,
+                "relative_path": rel_path,
+                "path": f"/inputs/uploads/{rel_path}",
+                "content_type": item.content_type or "application/octet-stream",
+                "size": len(item.content),
+                "purpose_hint": "user uploaded input; read this file only when relevant to the task",
+            }
+        )
+    return metadata
+
+
+def _write_input_files_for_run(run_root: Path, message: str, input_bundle: dict[str, Any]) -> None:
+    inputs_dir = run_root / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    _write_text(inputs_dir / "user_request.md", message)
+    _write_text(inputs_dir / "input_bundle.json", json.dumps(input_bundle, ensure_ascii=False, indent=2))
+
+
+def _should_return_binary_upload_limitation(route: str, attachments: list[dict[str, Any]]) -> bool:
+    if route != "general" or not attachments:
+        return False
+    return any(_is_non_text_upload(item) for item in attachments) and not _model_supports_image_input()
+
+
+def _binary_upload_limitation_answer(message: str, attachments: list[dict[str, Any]]) -> str:
+    files = [
+        f"- `{item.get('filename') or item.get('relative_path')}` ({item.get('content_type') or 'unknown'}, {item.get('size') or 0} bytes)"
+        for item in attachments
+    ]
+    return (
+        "我收到了你的请求，但当前配置的模型接口不能直接读取图片或二进制文件内容。\n\n"
+        f"你的问题：{message.strip() or '（无文本问题）'}\n\n"
+        "已上传附件：\n"
+        + "\n".join(files)
+        + "\n\n"
+        "这些文件已经保存到本次运行的 `/inputs/uploads/`，并记录在 `/inputs/input_bundle.json`。"
+        "如果要让我判断图片里是什么，需要接入 vision 模型或 OCR/图像解析工具；否则我只能基于文件名、大小和类型回答。"
+    )
+
+
+def _is_non_text_upload(item: dict[str, Any]) -> bool:
+    content_type = str(item.get("content_type") or "").lower()
+    filename = str(item.get("filename") or item.get("relative_path") or "").lower()
+    if content_type.startswith("text/") or content_type in {"application/json", "application/xml"}:
+        return False
+    text_suffixes = (".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css")
+    if filename.endswith(text_suffixes):
+        return False
+    return True
+
+
+def _model_supports_image_input() -> bool:
+    name = get_model_name().lower()
+    vision_markers = ("vision", "vl", "multimodal", "omni")
+    return any(marker in name for marker in vision_markers)
+
+
+def _safe_upload_path(value: str) -> str:
+    normalized = value.replace("\\", "/").strip().strip("/")
+    safe_parts = []
+    for part in normalized.split("/"):
+        cleaned = re.sub(r"[^A-Za-z0-9._() \-\u4e00-\u9fff]+", "_", part).strip()
+        if cleaned and cleaned not in {".", ".."}:
+            safe_parts.append(cleaned[:120])
+    return "/".join(safe_parts)
+
+
+def _deduplicate_upload_path(rel_path: str, used_paths: set[str]) -> str:
+    if rel_path not in used_paths:
+        return rel_path
+    path = Path(rel_path)
+    stem = path.stem or "file"
+    suffix = path.suffix
+    parent = path.parent.as_posix()
+    counter = 2
+    while True:
+        name = f"{stem}-{counter}{suffix}"
+        candidate = name if parent in {"", "."} else f"{parent}/{name}"
+        if candidate not in used_paths:
+            return candidate
+        counter += 1
 
 
 def extract_path_candidates(task_text: str) -> list[str]:

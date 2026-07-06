@@ -46,6 +46,60 @@ class ToolAllowlistMiddleware(AgentMiddleware):
         ]
 
 
+class UploadedBinaryReadGuardMiddleware(AgentMiddleware):
+    """Prevent non-vision model APIs from receiving image_url blocks from uploaded files."""
+
+    binary_extensions = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".ico",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".zip",
+        ".rar",
+        ".7z",
+    }
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        message = self._guard_message(request)
+        if message is not None:
+            return _text_tool_message(request, message)
+        return handler(request)
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        message = self._guard_message(request)
+        if message is not None:
+            return _text_tool_message(request, message)
+        return await handler(request)
+
+    def _guard_message(self, request: Any) -> str | None:
+        if _request_tool_name(request) != "read_file":
+            return None
+        path = _normalize_virtual_path(_read_file_path(_request_args(request)))
+        if not path.startswith("/inputs/uploads/"):
+            return None
+        suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+        if suffix not in self.binary_extensions:
+            return None
+        return (
+            f"`{path}` is an uploaded binary file. The current model endpoint only accepts text messages, "
+            "so this file was not read as image/PDF/binary content. Use the attachment metadata in "
+            "`/inputs/input_bundle.json` and explain that visual or binary inspection requires OCR, "
+            "a vision-capable model, or a text extraction step."
+        )
+
+
 class FinalOutputGuardMiddleware(AgentMiddleware):
     """Stop follow-up tool calls after declared final artifacts are written."""
 
@@ -171,6 +225,29 @@ def _blocked_tool_message(request: Any, content: str) -> ToolMessage:
         name=tool_name,
         status="error",
     )
+
+
+def _text_tool_message(request: Any, content: str) -> ToolMessage:
+    call = getattr(request, "tool_call", {}) or {}
+    tool_name = str(call.get("name") or "unknown")
+    tool_call_id = str(call.get("id") or "")
+    return ToolMessage(
+        content=content,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="success",
+    )
+
+
+def _read_file_path(args: dict[str, Any]) -> str:
+    return str(
+        args.get("file_path")
+        or args.get("path")
+        or args.get("filepath")
+        or args.get("file")
+        or args.get("filename")
+        or ""
+    ).replace("\\", "/")
 
 
 def _write_file_path(args: dict[str, Any]) -> str:

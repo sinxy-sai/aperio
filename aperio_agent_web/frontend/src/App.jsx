@@ -4,18 +4,23 @@ import {
   ChevronRight,
   CloudSun,
   CodeXml,
+  File as FileIcon,
   FileText,
   Folder,
+  FolderOpen,
+  Image,
   Menu,
   Minus,
   PanelRight,
+  Paperclip,
   Plus,
   RefreshCw,
   Settings,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const SESSION_STORE_KEY = "aperio.chat.sessions.v2";
 const LEGACY_SESSION_STORE_KEY = "aperio.chat.sessions.v1";
@@ -92,6 +97,10 @@ function ChatPage({ navigate }) {
   const [runMeta, setRunMeta] = useState("等待任务");
   const [running, setRunning] = useState(false);
   const [draftAssistant, setDraftAssistant] = useState("");
+  const [attachments, setAttachments] = useState([]);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
 
   const activeSession = useMemo(() => {
     return sessions.find((item) => item.id === activeId) || sessions[0];
@@ -217,27 +226,53 @@ function ChatPage({ navigate }) {
     setRunMeta("产物已刷新");
   }
 
+  function addAttachments(nextItems) {
+    if (!nextItems.length) return;
+    setAttachments((current) => {
+      const seen = new Set(current.map((item) => attachmentKey(item)));
+      const merged = [...current];
+      for (const item of nextItems) {
+        const key = attachmentKey(item);
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(item);
+        }
+      }
+      return merged.slice(0, 80);
+    });
+  }
+
+  function removeAttachment(id) {
+    setAttachments((current) => current.filter((item) => item.id !== id));
+  }
+
+  function handlePickedFiles(fileList) {
+    addAttachments(Array.from(fileList || []).map((file) => makeAttachment(file, file.webkitRelativePath || file.name)));
+  }
+
+  async function handleDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragActive(false);
+    const dropped = await collectDroppedAttachments(event.dataTransfer);
+    addAttachments(dropped);
+  }
+
   async function submitTask(event) {
     event.preventDefault();
-    const message = input.trim();
+    const pendingAttachments = attachments;
+    const message = input.trim() || (pendingAttachments.length ? "请分析我上传的文件。" : "");
     if (!message || running) return;
 
-    addMessage("user", message);
+    addMessage("user", formatUserMessage(message, pendingAttachments));
     setInput("");
+    setAttachments([]);
     setRunning(true);
     setDraftAssistant("正在连接后端...");
     setRunMeta("agent 正在处理");
 
     try {
-      const response = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          approval_mode: approvalMode,
-          timeout_seconds: Number(timeoutSeconds || 900),
-        }),
-      });
+      const response = await fetch("/api/chat/stream", requestBody(message, approvalMode, timeoutSeconds, pendingAttachments));
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `HTTP ${response.status}`);
@@ -352,17 +387,62 @@ function ChatPage({ navigate }) {
           ))}
         </div>
 
-        <form className="composer" onSubmit={submitTask}>
+        <form
+          className={`composer ${dragActive ? "drag-active" : ""}`}
+          onSubmit={submitTask}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setDragActive(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragActive(true);
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false);
+          }}
+          onDrop={handleDrop}
+        >
           <div className="composer-status">
             <span className={`status-dot ${health?.ok ? "ok" : health?.error ? "error" : ""}`} />
             <strong>{health?.ok ? "已连接" : health?.error ? "服务异常" : "连接中"}</strong>
             <span>{health ? `${health.engine || "agent"} · ${health.model || "model"}` : "检查本地服务"}</span>
           </div>
+          <input ref={fileInputRef} className="hidden-file-input" type="file" multiple onChange={(event) => handlePickedFiles(event.target.files)} />
+          <input ref={folderInputRef} className="hidden-file-input" type="file" multiple webkitdirectory="" directory="" onChange={(event) => handlePickedFiles(event.target.files)} />
+          {attachments.length > 0 && (
+            <div className="attachment-tray">
+              <div className="attachment-tray-head">
+                <span><Paperclip size={15} />{attachments.length} 个附件 · {formatBytes(attachments.reduce((sum, item) => sum + item.file.size, 0))}</span>
+                <button type="button" onClick={() => setAttachments([])}>清空</button>
+              </div>
+              <div className="attachment-list">
+                {attachments.map((item) => (
+                  <div className="attachment-chip" key={item.id} title={item.path}>
+                    {attachmentIcon(item)}
+                    <span>{formatFileLabel(item.path).name}</span>
+                    <small>{formatBytes(item.file.size)}</small>
+                    <button type="button" onClick={() => removeAttachment(item.id)} aria-label="移除附件"><X size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={4} placeholder="例如：为智慧校园导航助手写 PRD 并评审" />
           <div className="composer-actions">
-            <span>{runMeta}</span>
+            <div className="composer-tools">
+              <button type="button" onClick={() => fileInputRef.current?.click()} title="添加文件"><Paperclip size={17} />文件</button>
+              <button type="button" onClick={() => folderInputRef.current?.click()} title="添加文件夹"><FolderOpen size={17} />文件夹</button>
+              <span>{runMeta}</span>
+            </div>
             <button id="sendBtn" type="submit" disabled={running}>{running ? "运行中" : "运行"}</button>
           </div>
+          {dragActive && (
+            <div className="drop-overlay">
+              <Upload size={24} />
+              <span>松开后添加到本次对话</span>
+            </div>
+          )}
         </form>
       </section>
 
@@ -758,6 +838,103 @@ function groupFiles(files, artifactPaths) {
   return groups;
 }
 
+function makeAttachment(file, path) {
+  const normalizedPath = String(path || file.name || "file").replaceAll("\\", "/").replace(/^\/+/, "");
+  return {
+    id: `${Date.now()}_${Math.random().toString(16).slice(2)}_${normalizedPath}`,
+    file,
+    path: normalizedPath,
+  };
+}
+
+function attachmentKey(item) {
+  return `${item.path}:${item.file.size}:${item.file.lastModified}`;
+}
+
+function attachmentIcon(item) {
+  const type = item.file.type || "";
+  const name = item.path.toLowerCase();
+  if (type.startsWith("image/")) return <Image size={16} />;
+  if (name.includes("/")) return <Folder size={16} />;
+  if (name.endsWith(".md") || name.endsWith(".txt") || name.endsWith(".pdf") || name.endsWith(".doc") || name.endsWith(".docx")) {
+    return <FileText size={16} />;
+  }
+  return <FileIcon size={16} />;
+}
+
+function requestBody(message, approvalMode, timeoutSeconds, attachments) {
+  if (!attachments.length) {
+    return {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        approval_mode: approvalMode,
+        timeout_seconds: Number(timeoutSeconds || 900),
+      }),
+    };
+  }
+
+  const form = new FormData();
+  form.append("message", message);
+  form.append("approval_mode", approvalMode);
+  form.append("timeout_seconds", String(Number(timeoutSeconds || 900)));
+  for (const item of attachments) {
+    form.append("files", item.file, item.path);
+    form.append("paths", item.path);
+  }
+  return { method: "POST", body: form };
+}
+
+function formatUserMessage(message, attachments) {
+  if (!attachments.length) return message;
+  const fileLines = attachments
+    .slice(0, 12)
+    .map((item) => `- ${item.path} (${formatBytes(item.file.size)})`);
+  const suffix = attachments.length > 12 ? `\n- 另有 ${attachments.length - 12} 个附件` : "";
+  return `${message}\n\n附件：\n${fileLines.join("\n")}${suffix}`;
+}
+
+async function collectDroppedAttachments(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []);
+  if (items.length && items.some((item) => typeof item.webkitGetAsEntry === "function")) {
+    const nested = await Promise.all(
+      items
+        .map((item) => item.webkitGetAsEntry?.())
+        .filter(Boolean)
+        .map((entry) => readDroppedEntry(entry, "")),
+    );
+    return nested.flat();
+  }
+  return Array.from(dataTransfer?.files || []).map((file) => makeAttachment(file, file.webkitRelativePath || file.name));
+}
+
+function readDroppedEntry(entry, prefix) {
+  if (entry.isFile) {
+    return new Promise((resolve) => {
+      entry.file((file) => resolve([makeAttachment(file, `${prefix}${file.name}`)]), () => resolve([]));
+    });
+  }
+  if (!entry.isDirectory) return Promise.resolve([]);
+
+  const reader = entry.createReader();
+  const directoryPrefix = `${prefix}${entry.name}/`;
+  const batches = [];
+  return new Promise((resolve) => {
+    const readBatch = () => {
+      reader.readEntries(async (entries) => {
+        if (!entries.length) {
+          resolve(Promise.all(batches).then((groups) => groups.flat()));
+          return;
+        }
+        batches.push(Promise.all(entries.map((child) => readDroppedEntry(child, directoryPrefix))).then((groups) => groups.flat()));
+        readBatch();
+      }, () => resolve([]));
+    };
+    readBatch();
+  });
+}
+
 async function fetchJson(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -783,6 +960,13 @@ async function readNdjson(body, onEvent) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function formatSeconds(value) {

@@ -390,9 +390,16 @@ input {
 }
 
 .composer {
+  position: relative;
   width: min(960px, calc(100% - 36px));
   min-width: 0;
   margin: 0 auto 18px;
+}
+
+.composer.drag-active textarea,
+.composer.drag-active .attachment-tray {
+  border-color: rgba(24, 119, 84, 0.45);
+  box-shadow: 0 0 0 3px rgba(24, 119, 84, 0.1), 0 18px 60px rgba(50, 74, 118, 0.11);
 }
 
 .composer-status {
@@ -413,6 +420,113 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.attachment-tray {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fbfcfd;
+  padding: 10px;
+}
+
+.attachment-tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.attachment-tray-head span,
+.composer-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.attachment-tray-head button,
+.composer-tools button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--panel);
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.attachment-tray-head button:hover,
+.composer-tools button:hover {
+  background: var(--soft);
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 112px;
+  overflow: auto;
+}
+
+.attachment-chip {
+  display: grid;
+  grid-template-columns: auto minmax(48px, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+  max-width: 260px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 5px 6px 5px 9px;
+}
+
+.attachment-chip svg {
+  color: var(--blue);
+}
+
+.attachment-chip span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip small {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  padding: 0;
+}
+
+.attachment-chip button:hover {
+  color: var(--red);
+  background: #fff1f0;
 }
 
 .status-dot {
@@ -444,7 +558,35 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-top: 10px;
+}
+
+.composer-tools {
+  flex-wrap: wrap;
+}
+
+.composer-tools > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 38px 0 58px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  border: 2px dashed rgba(24, 119, 84, 0.55);
+  border-radius: 22px;
+  color: var(--green);
+  background: rgba(251, 253, 252, 0.88);
+  font-weight: 900;
+  pointer-events: none;
 }
 
 #sendBtn {

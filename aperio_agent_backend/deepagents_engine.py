@@ -29,7 +29,12 @@ from .config import (
     get_tool_max_retries,
 )
 from .hitl import build_interrupt_policy, resolve_human_interrupts
-from .middleware import FinalOutputGuardMiddleware, RouterToolGuardMiddleware, ToolAllowlistMiddleware
+from .middleware import (
+    FinalOutputGuardMiddleware,
+    RouterToolGuardMiddleware,
+    ToolAllowlistMiddleware,
+    UploadedBinaryReadGuardMiddleware,
+)
 from .mcp_tools import load_mcp_tools
 from .observability import RunTelemetry, TelemetryMiddleware
 from .policy import write_local_policy
@@ -145,6 +150,12 @@ def run_deep_agent(
         runtime_notes += "- MCP tools are enabled. Use internet_search only when public evidence is useful and save evidence under /outputs when instructed.\n"
     if mcp_toolset.errors:
         runtime_notes += "- MCP load errors: " + " | ".join(mcp_toolset.errors) + "\n"
+    if input_bundle.get("attachments"):
+        runtime_notes += (
+            "- User uploaded files are listed in /inputs/input_bundle.json and stored under /inputs/uploads. "
+            "Images, PDFs, Office files, archives, and other binary files cannot be visually or binary-inspected by the current text-only model endpoint; "
+            "do not call read_file on those binary paths unless a text extraction tool is available.\n"
+        )
 
     config = {"configurable": {"thread_id": run_root.name}}
     response = router.invoke(
@@ -212,6 +223,7 @@ def _runtime_middleware(fallback_model: Any | None, retry_tools: set[str] | None
     ]
     if fallback_model is not None:
         middleware.append(ModelFallbackMiddleware(fallback_model))
+    middleware.append(UploadedBinaryReadGuardMiddleware())
     if retry_tools is None:
         retry_tools = {"read_file", "internet_search"}
     if retry_tools:
