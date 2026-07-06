@@ -496,16 +496,18 @@ function ObservabilityPage({ navigate }) {
         </section>
 
         <section className="detail-grid">
-          <Surface title="Agent 分布" meta={`${agents.length} agents`} collapsed={collapsed.agents} onToggle={() => toggle("agents")} className="agents-surface">
-            {!agents.length ? <div className="empty-state">暂无 Agent 调用数据。</div> : agents.map(([name, counts]) => <AgentRow key={name} name={name} counts={counts} />)}
-          </Surface>
+          <div className="detail-stack">
+            <Surface title="Agent 分布" meta={`${agents.length} agents`} collapsed={collapsed.agents} onToggle={() => toggle("agents")} className="agents-surface">
+              {!agents.length ? <div className="empty-state">暂无 Agent 调用数据。</div> : agents.map(([name, counts]) => <AgentRow key={name} name={name} counts={counts} />)}
+            </Surface>
+
+            <Surface title="产物与文件" meta={`${files.length} files`} collapsed={collapsed.files} onToggle={() => toggle("files")} className="files-surface">
+              <GroupedFiles runId={selectedRunId} files={files} artifacts={artifacts} />
+            </Surface>
+          </div>
 
           <Surface title="事件时间线" meta={`${events.length} events`} collapsed={collapsed.events} onToggle={() => toggle("events")} className="timeline-surface">
             {!events.length ? <div className="empty-state">暂无模型或工具事件。</div> : events.slice().reverse().map((event, index) => <EventRow key={index} event={event} />)}
-          </Surface>
-
-          <Surface title="产物与文件" meta={`${files.length} files`} collapsed={collapsed.files} onToggle={() => toggle("files")} className="files-surface">
-            <GroupedFiles runId={selectedRunId} files={files} artifacts={artifacts} />
           </Surface>
         </section>
       </section>
@@ -631,14 +633,20 @@ function GroupedFiles({ runId, files, artifacts }) {
   return (
     <div className="file-list">
       {groups.filter((group) => group.files.length).map((group) => (
-        <details className="file-group" key={group.label} open>
-          <summary><strong>{group.label}</strong><span>{group.files.length} files</span></summary>
+        <details className={`file-group file-group-${group.kind}`} key={group.kind} open={group.defaultOpen}>
+          <summary>
+            <strong>{group.label}</strong>
+            <span>{group.files.length} files</span>
+          </summary>
           <div className="file-group-body">
             {group.files.map((file) => (
-              <div className="file-row" key={file.path}>
+              <div className="file-row" key={file.path} title={file.path}>
                 <div>
-                  <strong>{file.path}</strong>
-                  <span className="file-meta">{formatNumber(file.size)} bytes</span>
+                  <strong>{formatFileLabel(file.path).name}</strong>
+                  <span className="file-meta">
+                    {formatFileLabel(file.path).parent ? `${formatFileLabel(file.path).parent} · ` : ""}
+                    {formatNumber(file.size)} bytes
+                  </span>
                 </div>
                 <a href={`/api/runs/${encodeURIComponent(runId)}/artifact?path=${encodeURIComponent(file.path)}`}>{artifactPaths.has(file.path) ? "下载" : "打开"}</a>
               </div>
@@ -652,19 +660,18 @@ function GroupedFiles({ runId, files, artifacts }) {
 
 function groupFiles(files, artifactPaths) {
   const groups = [
-    { label: "主要产物", files: [] },
-    { label: "outputs", files: [] },
-    { label: "inputs", files: [] },
-    { label: "skills", files: [] },
-    { label: "其他文件", files: [] },
+    { kind: "outputs", label: "输出产物", files: [], defaultOpen: true },
+    { kind: "inputs", label: "输入文件", files: [], defaultOpen: true },
+    { kind: "skills", label: "Skills", files: [], defaultOpen: false },
+    { kind: "other", label: "其他文件", files: [], defaultOpen: false },
   ];
+  const groupByKind = Object.fromEntries(groups.map((group) => [group.kind, group]));
   for (const file of files) {
     const path = file.path || "";
-    if (artifactPaths.has(path)) groups[0].files.push(file);
-    else if (path.startsWith("outputs/")) groups[1].files.push(file);
-    else if (path.startsWith("inputs/")) groups[2].files.push(file);
-    else if (path.startsWith("skills/")) groups[3].files.push(file);
-    else groups[4].files.push(file);
+    if (path.startsWith("inputs/")) groupByKind.inputs.files.push(file);
+    else if (path.startsWith("skills/")) groupByKind.skills.files.push(file);
+    else if (artifactPaths.has(path) || path.startsWith("outputs/")) groupByKind.outputs.files.push(file);
+    else groupByKind.other.files.push(file);
   }
   return groups;
 }
@@ -698,6 +705,15 @@ function formatNumber(value) {
 
 function formatSeconds(value) {
   return `${Number(value || 0).toFixed(1)}s`;
+}
+
+function formatFileLabel(path) {
+  const normalized = String(path || "").replaceAll("\\", "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return {
+    name: parts.at(-1) || normalized || "文件",
+    parent: parts.length > 1 ? parts.slice(0, -1).join("/") : "",
+  };
 }
 
 function totalCalls(counts) {
