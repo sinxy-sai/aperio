@@ -4,6 +4,8 @@ import {
   ChevronRight,
   CloudSun,
   CodeXml,
+  Check,
+  Copy,
   File as FileIcon,
   FileText,
   Folder,
@@ -100,6 +102,7 @@ function ChatPage({ navigate }) {
   const [draftAssistant, setDraftAssistant] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [dragActive, setDragActive] = useState(false);
+  const composerRef = useRef(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const streamRef = useRef(null);
@@ -286,6 +289,12 @@ function ChatPage({ navigate }) {
     addAttachments(dropped);
   }
 
+  function handleComposerKeyDown(event) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent?.isComposing) return;
+    event.preventDefault();
+    composerRef.current?.requestSubmit();
+  }
+
   function stopRunningRun() {
     const stream = streamRef.current;
     if (stream) {
@@ -454,6 +463,7 @@ function ChatPage({ navigate }) {
         </div>
 
         <form
+          ref={composerRef}
           className={`composer ${dragActive ? "drag-active" : ""}`}
           onSubmit={submitTask}
           onDragEnter={(event) => {
@@ -494,7 +504,7 @@ function ChatPage({ navigate }) {
               </div>
             </div>
           )}
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={4} placeholder="例如：为智慧校园导航助手写 PRD 并评审" />
+          <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={handleComposerKeyDown} rows={4} placeholder="例如：为智慧校园导航助手写 PRD 并评审" />
           <div className="composer-actions">
             <div className="composer-tools">
               <button type="button" onClick={() => fileInputRef.current?.click()} title="添加文件"><Paperclip size={17} />文件</button>
@@ -779,10 +789,27 @@ function Welcome({ onUse }) {
 }
 
 function Message({ role, text }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyReply() {
+    await copyText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
   return (
     <article className={`message ${role}`}>
       <div className="avatar">{role === "user" ? "ME" : "AI"}</div>
-      <div className="bubble">{text}</div>
+      <div className="message-content">
+        <div className="bubble">{text}</div>
+        {role === "assistant" && (
+          <div className="message-actions">
+            <button type="button" onClick={copyReply} title={copied ? "已复制" : "复制回复"} aria-label={copied ? "已复制" : "复制回复"}>
+              {copied ? <Check size={15} /> : <Copy size={15} />}
+            </button>
+          </div>
+        )}
+      </div>
     </article>
   );
 }
@@ -1008,6 +1035,22 @@ async function fetchJson(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 async function readNdjson(body, onEvent) {

@@ -372,9 +372,20 @@ input {
   background: var(--green);
 }
 
-.bubble {
+.message-content {
+  display: grid;
   min-width: 0;
   max-width: min(760px, calc(100% - 46px));
+  gap: 7px;
+}
+
+.message.user .message-content {
+  justify-items: end;
+}
+
+.bubble {
+  min-width: 0;
+  max-width: 100%;
   border-radius: 18px;
   background: var(--soft);
   padding: 14px 17px;
@@ -387,6 +398,30 @@ input {
 .message.user .bubble {
   color: #fff;
   background: var(--green);
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+}
+
+.message-actions button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  padding: 0;
+}
+
+.message-actions button:hover {
+  border-color: var(--line);
+  color: var(--ink);
+  background: var(--panel);
 }
 
 .composer {
@@ -1471,8 +1506,12 @@ pre {
     gap: 8px;
   }
 
-  .bubble {
+  .message-content {
     max-width: calc(100% - 38px);
+  }
+
+  .bubble {
+    max-width: 100%;
     padding: 12px 14px;
   }
 
