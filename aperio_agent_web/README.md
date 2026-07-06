@@ -1,6 +1,24 @@
 # Aperio Agent Web
 
-独立的本地 Web 工作台，用来调用 `demo/aperio_integrated.py` 里的 Aperio agent。
+独立的本地 Web 工作台，用来调用 `aperio_agent_backend` 里的后端 agent。
+
+## 后端配置
+
+从模板创建 `aperio_agent_backend/.env`：
+
+```powershell
+Copy-Item aperio_agent_backend/.env.example aperio_agent_backend/.env
+```
+
+然后填入：
+
+```env
+DEEPSEEK_API_KEY=你的 key
+APERIO_MODEL=openai:deepseek-v4-flash
+APERIO_BASE_URL=https://api.deepseek.com
+```
+
+也可以直接在当前 shell 中设置这些环境变量。
 
 ## 启动
 
@@ -30,7 +48,7 @@ python -m uvicorn aperio_agent_web.app:app --reload --host 127.0.0.1 --port 8089
 
 ## 说明
 
-- 网页不会放在 `demo` 目录里；`demo` 只作为已有 agent 的代码来源。
-- `自动批准` 会通过 `APERIO_HITL_MODE=approve` 处理脚本中的 HITL 确认，适合本地沙箱运行。
-- `自动拒绝` 会拒绝需要确认的工具调用，适合只想测试普通问答链路。
-- 运行产物仍写入 `demo/workspace_integrated/<run_id>/`，页面右侧会预览常见 Markdown 产物。
+- Web UI 不再启动 `demo/aperio_integrated.py`。
+- 后端 agent 位于 `aperio_agent_backend/`。
+- 运行产物写入 `aperio_agent_backend/workspace/<run_id>/`，页面右侧会预览常见 Markdown 产物。
+- 当前代码体检是轻量静态扫描，不依赖 Docker，也不会运行测试、安全扫描或依赖漏洞扫描工具。
