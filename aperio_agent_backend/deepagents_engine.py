@@ -10,6 +10,8 @@ from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 
 from .config import get_api_key, get_base_url, get_model_name
+from .hitl import build_interrupt_policy, resolve_human_interrupts
+from .mcp_tools import load_mcp_tools
 from .resources import copy_packaged_skills
 
 
@@ -19,6 +21,7 @@ def run_deep_agent(
     *,
     input_bundle: dict[str, Any],
     code_scan_summary: dict[str, Any] | None = None,
+    approval_mode: str = "approve",
 ) -> str:
     """Run the package-native DeepAgents implementation.
 
@@ -33,13 +36,17 @@ def run_deep_agent(
     backend = FilesystemBackend(root_dir=str(run_root), virtual_mode=True)
     model = _model()
     checkpointer = MemorySaver()
+    mcp_toolset = load_mcp_tools(run_root)
+    shared_tools = mcp_toolset.shared
+    general_tools = [*mcp_toolset.shared, *mcp_toolset.general_purpose]
+    interrupt_on = build_interrupt_policy()
     permissions = [
         FilesystemPermission(operations=["read", "write"], paths=["/*"], mode="allow"),
     ]
 
-    code_health_agent = _compiled_code_health_agent(model, backend, checkpointer, permissions)
-    prd_agent = _compiled_prd_agent(model, backend, checkpointer, permissions)
-    general_agent = _compiled_general_agent(model, backend, checkpointer, permissions)
+    code_health_agent = _compiled_code_health_agent(model, backend, checkpointer, permissions, interrupt_on)
+    prd_agent = _compiled_prd_agent(model, backend, checkpointer, permissions, interrupt_on, shared_tools)
+    general_agent = _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, general_tools)
 
     router = create_deep_agent(
         model=model,
@@ -47,11 +54,19 @@ def run_deep_agent(
         backend=backend,
         checkpointer=checkpointer,
         permissions=permissions,
+        interrupt_on=interrupt_on,
         system_prompt=_router_prompt(),
         subagents=[code_health_agent, prd_agent, general_agent],
         name="aperio-router",
     )
 
+    runtime_notes = ""
+    if shared_tools or general_tools:
+        runtime_notes += "- MCP tools are enabled. Use internet_search only when public evidence is useful and save evidence under /outputs when instructed.\n"
+    if mcp_toolset.errors:
+        runtime_notes += "- MCP load errors: " + " | ".join(mcp_toolset.errors) + "\n"
+
+    config = {"configurable": {"thread_id": run_root.name}}
     response = router.invoke(
         {
             "messages": [
@@ -63,13 +78,15 @@ def run_deep_agent(
                         "- /inputs/input_bundle.json 是标准化输入包。\n"
                         "- /inputs/user_request.md 是用户原始请求。\n"
                         "- 如果是代码健康任务，/outputs/code_health/raw/tool_results.json 是后端扫描器生成的确定性证据。\n\n"
+                        f"{runtime_notes}"
                         "请只通过 task 委托给合适的子 agent，完成后用中文简要返回结果和产物路径。"
                     ),
                 }
             ]
         },
-        config={"configurable": {"thread_id": run_root.name}},
+        config=config,
     )
+    response = resolve_human_interrupts(router, response, config, approval_mode=approval_mode)
     return _extract_final_answer(response) or "Agent run completed."
 
 
@@ -103,13 +120,14 @@ def _write_input_files(
     )
 
 
-def _compiled_code_health_agent(model, backend, checkpointer, permissions) -> dict[str, Any]:
+def _compiled_code_health_agent(model, backend, checkpointer, permissions, interrupt_on) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
         tools=[],
         backend=backend,
         checkpointer=checkpointer,
         permissions=permissions,
+        interrupt_on=interrupt_on,
         skills=["/skills/code-health"],
         system_prompt=_code_health_prompt(),
         subagents=_code_health_reviewers(),
@@ -122,16 +140,17 @@ def _compiled_code_health_agent(model, backend, checkpointer, permissions) -> di
     }
 
 
-def _compiled_prd_agent(model, backend, checkpointer, permissions) -> dict[str, Any]:
+def _compiled_prd_agent(model, backend, checkpointer, permissions, interrupt_on, web_tools: list[Any]) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
-        tools=[],
+        tools=web_tools,
         backend=backend,
         checkpointer=checkpointer,
         permissions=permissions,
+        interrupt_on=interrupt_on,
         skills=["/skills/prd-review", "/skills/shared"],
         system_prompt=_prd_prompt(),
-        subagents=_prd_reviewers(),
+        subagents=_prd_reviewers(web_tools),
         name="prd-review-orchestrator",
     )
     return {
@@ -141,13 +160,14 @@ def _compiled_prd_agent(model, backend, checkpointer, permissions) -> dict[str, 
     }
 
 
-def _compiled_general_agent(model, backend, checkpointer, permissions) -> dict[str, Any]:
+def _compiled_general_agent(model, backend, checkpointer, permissions, interrupt_on, tools: list[Any]) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
-        tools=[],
+        tools=tools,
         backend=backend,
         checkpointer=checkpointer,
         permissions=permissions,
+        interrupt_on=interrupt_on,
         skills=["/skills/shared"],
         system_prompt=_general_prompt(),
         name="general-purpose",
@@ -268,18 +288,20 @@ def _prd_prompt() -> str:
 硬性约束：
 - 全文使用中文。
 - 用户输入是最高优先级事实来源。
-- 可以参考公开网络证据的写法，但当前后端未接入联网搜索工具时不要假装已搜索。
+- 如果 internet_search 工具可用，Writer 最多调用 1 次并保存到 /outputs/prd_review/raw/web_search/writer-research.json；如果工具不可用，不要假装已搜索。
 - 不要创建 final_report.md、merged-report.md 或根目录别名文件。"""
 
 
-def _prd_reviewers() -> list[dict[str, Any]]:
+def _prd_reviewers(web_tools: list[Any]) -> list[dict[str, Any]]:
     return [
         {
             "name": "product-strategist",
             "description": "从产品策略、价值、范围和运营视角评审 PRD。",
             "skills": ["/skills/prd-review", "/skills/shared"],
+            "tools": web_tools,
             "system_prompt": """你是产品策略分析师。读取 /outputs/prd_review/prd_v1.md。
-输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_strategy.md。不要假装已经联网搜索。""",
+如果 internet_search 工具可用，最多调用 1 次并保存到 /outputs/prd_review/raw/web_search/product-strategy.json；如果工具不可用，不要假装已经联网搜索。
+输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_strategy.md。""",
         },
         {
             "name": "technical-feasibility",
@@ -324,7 +346,8 @@ def _general_prompt() -> str:
 
 边界：
 - 不要创建 PRD 或代码健康产物，除非用户明确要求。
-- 如果问题需要实时数据或联网搜索，但当前没有可用工具，请说明限制，不要编造。
+- 如果问题需要实时数据或联网搜索，优先使用可用 MCP 工具；没有可用工具时说明限制，不要编造。
+- 对天气、城市、地址、周边、路线类问题，如果 maps_ 开头的高德 MCP 工具可用，优先调用；不可用时说明需要配置 AMAP_API_KEY 和 APERIO_ENABLE_MCP。
 - 如果用户提到“今天、明天、昨天”等相对日期，请结合当前运行日期，但没有外部数据时不要假装已验证。"""
 
 

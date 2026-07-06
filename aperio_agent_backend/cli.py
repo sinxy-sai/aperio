@@ -8,11 +8,14 @@ from pathlib import Path
 from .config import (
     APERIO_HOME,
     WORKSPACE_ROOT,
+    get_amap_api_key,
     get_api_key,
     get_base_url,
+    get_enable_mcp_tools,
     get_engine_name,
     get_install_project_deps,
     get_model_name,
+    get_scan_sandbox_mode,
 )
 from .runner import run_agent
 
@@ -48,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run one prompt and exit")
     run_parser.add_argument("message", nargs="+", help="Prompt text")
-    run_parser.add_argument("--approval-mode", choices=("approve", "reject"), default="approve")
+    run_parser.add_argument("--approval-mode", choices=("prompt", "approve", "reject"), default="approve")
     run_parser.add_argument("--timeout", type=int, default=900)
 
     serve_parser = subparsers.add_parser("serve", help="Start the local Web UI")
@@ -88,7 +91,7 @@ def repl() -> int:
             init_config(force=False)
             continue
 
-        result = run_agent(message)
+        result = run_agent(message, approval_mode="prompt")
         print()
         print(result.answer)
         if result.artifacts:
@@ -125,7 +128,10 @@ def init_config(force: bool = False) -> int:
             "APERIO_ENGINE=deepagents\n"
             "APERIO_MODEL=openai:deepseek-v4-flash\n"
             "APERIO_BASE_URL=https://api.deepseek.com\n"
-            "APERIO_INSTALL_PROJECT_DEPS=0\n",
+            "APERIO_INSTALL_PROJECT_DEPS=0\n"
+            "APERIO_SCAN_SANDBOX=host\n"
+            "APERIO_ENABLE_MCP=0\n"
+            "AMAP_API_KEY=\n",
             encoding="utf-8",
         )
     print(f"Created config: {target}")
@@ -150,7 +156,10 @@ def doctor() -> int:
     print(f"Engine:    {get_engine_name()}")
     print(f"Model:     {get_model_name()}")
     print(f"Base URL:  {get_base_url()}")
+    print(f"Scan sandbox: {get_scan_sandbox_mode()}")
     print(f"Install deps for scan: {'yes' if get_install_project_deps() else 'no'}")
+    print(f"MCP tools: {'enabled' if get_enable_mcp_tools() else 'disabled'}")
+    print(f"Amap key:  {'configured' if get_amap_api_key() else 'missing'}")
     print(f"API key:   {'configured' if get_api_key() else 'missing'}")
     return 0 if get_api_key() else 1
 

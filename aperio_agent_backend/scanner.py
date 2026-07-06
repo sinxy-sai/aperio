@@ -16,6 +16,7 @@ def run_code_health_scan(
     *,
     timeout_seconds: int = 300,
     install_project_deps: bool = False,
+    sandbox_mode: str = "host",
 ) -> dict[str, Any]:
     """Run the migrated deterministic code-health toolkit.
 
@@ -23,6 +24,29 @@ def run_code_health_scan(
     by the backend, not by the model. That keeps CLI and web usage predictable
     while still giving the agent real tool evidence.
     """
+    sandbox_mode = (sandbox_mode or "host").strip().lower()
+    if sandbox_mode in {"docker", "auto"}:
+        try:
+            from .sandbox import run_code_health_scan_in_docker
+
+            return run_code_health_scan_in_docker(
+                project_root,
+                target_rel,
+                out_path,
+                timeout_seconds=timeout_seconds,
+                install_project_deps=install_project_deps,
+            )
+        except Exception as exc:
+            if sandbox_mode == "docker":
+                result = _fallback_result(project_root, target_rel, f"Docker sandbox failed: {exc}")
+                _write_json(out_path, result)
+                return result
+            docker_error = str(exc)
+        else:
+            docker_error = ""
+    else:
+        docker_error = ""
+
     script = packaged_skills_root() / "code-health" / "code-health-toolkit" / "scripts" / "run_checks.py"
     if not script.exists():
         result = _fallback_result(project_root, target_rel, "code-health toolkit script is missing")
@@ -69,11 +93,14 @@ def run_code_health_scan(
             data.setdefault("backend_invocation", {})
             data["backend_invocation"].update(
                 {
+                    "scanner_mode": "host",
                     "exit_code": completed.returncode,
                     "summary_output": (completed.stdout or "")[-12000:],
                     "invoked_by": "aperio_agent_backend.scanner",
                 }
             )
+            if docker_error:
+                data["backend_invocation"]["docker_fallback_reason"] = docker_error
             _write_json(out_path, data)
             return data
         except json.JSONDecodeError:

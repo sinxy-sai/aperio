@@ -35,6 +35,9 @@ APERIO_ENGINE=deepagents
 APERIO_MODEL=openai:deepseek-v4-flash
 APERIO_BASE_URL=https://api.deepseek.com
 APERIO_INSTALL_PROJECT_DEPS=0
+APERIO_SCAN_SANDBOX=host
+APERIO_ENABLE_MCP=0
+AMAP_API_KEY=
 ```
 
 ## CLI
@@ -67,4 +70,6 @@ aperio doctor
 
 The default engine is `deepagents`, which runs a package-native DeepAgents router with PRD, code-health, and general-purpose subagents. Set `APERIO_ENGINE=lite` for the simpler fallback engine.
 
-Code-health mode now packages the migrated demo skills and the deterministic `code-health-toolkit`. It does not require Docker. By default it does not install project dependencies; when tools such as `ruff`, `mypy`, `bandit`, `radon`, or `detect-secrets` are installed in the current environment, their results are saved to `outputs/code_health/raw/tool_results.json` and used as report evidence.
+Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it scans on the host and does not install project dependencies. Set `APERIO_SCAN_SANDBOX=docker` to run the scanner in the packaged Docker sandbox, or `auto` to try Docker and fall back to host scanning.
+
+Optional MCP tools are disabled by default. Install `aperio-agent[mcp]`, set `APERIO_ENABLE_MCP=1`, and optionally set `AMAP_API_KEY` to enable public web search and Amap tools for agent workflows.

@@ -49,3 +49,20 @@ def get_engine_name() -> str:
 
 def get_install_project_deps() -> bool:
     return os.environ.get("APERIO_INSTALL_PROJECT_DEPS", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_scan_sandbox_mode() -> str:
+    value = os.environ.get("APERIO_SCAN_SANDBOX", "host").strip().lower()
+    return value if value in {"host", "docker", "auto"} else "host"
+
+
+def get_sandbox_image() -> str:
+    return os.environ.get("APERIO_SANDBOX_IMAGE", "aperio-sandbox:py311-tools").strip()
+
+
+def get_enable_mcp_tools() -> bool:
+    return os.environ.get("APERIO_ENABLE_MCP", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_amap_api_key() -> str:
+    return os.environ.get("AMAP_API_KEY", "").strip()

@@ -10,10 +10,13 @@ from pydantic import BaseModel, Field
 
 from aperio_agent_backend.config import (
     WORKSPACE_ROOT,
+    get_amap_api_key,
     get_api_key,
+    get_enable_mcp_tools,
     get_engine_name,
     get_install_project_deps,
     get_model_name,
+    get_scan_sandbox_mode,
 )
 from aperio_agent_backend.runner import run_agent, safe_artifact_path
 
@@ -43,7 +46,10 @@ def health() -> dict[str, Any]:
         "backend": "aperio_agent_backend",
         "engine": get_engine_name(),
         "model": get_model_name(),
+        "scanSandbox": get_scan_sandbox_mode(),
         "installProjectDeps": get_install_project_deps(),
+        "mcpTools": get_enable_mcp_tools(),
+        "amapConfigured": bool(get_amap_api_key()),
         "workspace": str(WORKSPACE_ROOT),
         "configured": bool(get_api_key()),
     }

@@ -18,6 +18,7 @@ from .config import (
     get_engine_name,
     get_install_project_deps,
     get_model_name,
+    get_scan_sandbox_mode,
 )
 from .deepagents_engine import run_deep_agent
 from .scanner import compact_scan_summary, run_code_health_scan
@@ -97,6 +98,7 @@ def run_agent(message: str, approval_mode: str = "approve", timeout_seconds: int
                 run_root / "outputs" / "code_health" / "raw" / "tool_results.json",
                 timeout_seconds=min(max(timeout_seconds // 3, 60), 360),
                 install_project_deps=get_install_project_deps(),
+                sandbox_mode=get_scan_sandbox_mode(),
             )
             scan_summary = compact_scan_summary(scan_result)
 
@@ -106,6 +108,7 @@ def run_agent(message: str, approval_mode: str = "approve", timeout_seconds: int
                 run_root,
                 input_bundle=input_bundle,
                 code_scan_summary=scan_summary,
+                approval_mode=approval_mode,
             )
         else:
             if route == "prd":

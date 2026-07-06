@@ -25,6 +25,14 @@ dependencies = [
 web = [
   "uvicorn>=0.29",
 ]
+mcp = [
+  "ddgs>=9.0",
+  "fastmcp>=2.0",
+  "langchain-mcp-adapters>=0.1.0",
+]
+sandbox = [
+  "docker>=7.0",
+]
 dev = [
   "build>=1.0",
 ]
@@ -38,6 +46,7 @@ packages = ["aperio_agent_backend", "aperio_agent_web", "aperio_agent_web.static
 [tool.setuptools.package-data]
 aperio_agent_backend = [
   ".env.example",
+  "sandbox-assets/Dockerfile",
   "skill-assets/**/*.md",
   "skill-assets/**/*.py",
   "skill-assets/**/*.txt",
