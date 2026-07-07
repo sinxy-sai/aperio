@@ -41,7 +41,10 @@ class AgentSkillSources:
                 src.relative_to(self.skills_root)
             except ValueError as exc:
                 raise ValueError(f"skill path escapes skills root: {ref}") from exc
-            allowed[src.name] = src
+            skill_name = src.name
+            if skill_name in allowed:
+                skill_name = _safe_source_name(ref.strip("/").replace("/", "-"))
+            allowed[skill_name] = src
         self.sources[source_name] = allowed
         return [f"{self.virtual_root}/{source_name}"]
 

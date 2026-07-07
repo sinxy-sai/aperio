@@ -49,6 +49,7 @@ APERIO_ENABLE_MCP=0
 APERIO_KNOWLEDGE_ENABLED=1
 APERIO_KNOWLEDGE_DB=
 APERIO_SAFE_EXECUTION_ENABLED=1
+APERIO_EXTENSIONS_ENABLED=1
 AMAP_API_KEY=
 FEISHU_APP_ID=
 FEISHU_APP_SECRET=
@@ -123,6 +124,7 @@ Useful interactive commands:
 /runs       List recent runs
 /artifacts  List artifacts for the last run
 /channels   Show software channel config status
+/commands   List project/user extension commands
 /knowledge  Sync or search local project knowledge
 /safe       Run a conservative read-only allowlisted command
 /exit       Quit
@@ -164,6 +166,10 @@ DeepAgents runs on a routed workspace backend. Inputs, outputs, local policy fil
 Local project knowledge is indexed with SQLite FTS, not a heavy vector database. Aperio indexes README files, `docs/**/*.md`, and selected project notes into `~/.aperio/knowledge.sqlite3` by default, then writes matching snippets for each run to `/inputs/project_context.md`. Use `/knowledge sync`, `/knowledge search <query>`, and `/knowledge path` in the CLI for manual inspection.
 
 A conservative safe-execution wrapper is available for single-user local workflows. It rejects shell metacharacters, keeps the working directory inside `APERIO_PROJECT_ROOT`, enforces timeouts, and only allows a small read-only command set such as `git status`, `git diff`, `git log`, `rg`, and `python -m py_compile`/`compileall`. Use `/safe <command>` in the CLI to test the policy.
+
+Project and user extensions are enabled by default. Put project commands in `.aperio/commands/*.md` and user commands in `~/.aperio/commands/*.md`; the filename registers the slash command, for example `.aperio/commands/review.md` becomes `/review`. Command files are Markdown prompt templates, not executable scripts. Optional frontmatter supports `name`, `description`, `approval_mode`, and `timeout_seconds`; use `{{args}}` or `$ARGUMENTS` where command arguments should be inserted.
+
+Project skills live under `.aperio/skills/<skill>/SKILL.md`; user skills live under `~/.aperio/skills/<skill>/SKILL.md`. At runtime they are copied read-only into `/skills/project/...` and `/skills/user/...`, listed by `/skills`, and attached to the general-purpose agent. Set `APERIO_EXTENSIONS_ENABLED=0` to disable local extensions.
 
 Optional MCP tools are disabled by default. Install `aperio-agent[mcp]`, set `APERIO_ENABLE_MCP=1`, and optionally set `AMAP_API_KEY` to enable public web search and Amap tools for agent workflows.
 

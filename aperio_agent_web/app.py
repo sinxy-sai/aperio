@@ -30,6 +30,7 @@ from aperio_agent_backend.config import (
     get_scan_sandbox_mode,
 )
 from aperio_agent_backend.event_protocol import normalize_event
+from aperio_agent_backend.extensions import discover_extension_commands, discover_extension_skills
 from aperio_agent_backend.memory import (
     add_memory,
     clear_memories,
@@ -115,6 +116,35 @@ def health() -> dict[str, Any]:
         "configured": bool(get_api_key()),
         "memoryEnabled": memory_enabled(),
         "memoryDb": str(memory_db_path()),
+        "extensionCommands": len(discover_extension_commands()),
+        "extensionSkills": len(discover_extension_skills()),
+    }
+
+
+@app.get("/api/extensions")
+def extensions() -> dict[str, Any]:
+    return {
+        "commands": [
+            {
+                "name": command.name,
+                "description": command.description,
+                "source": command.source,
+                "path": str(command.path),
+                "approvalMode": command.approval_mode,
+                "timeoutSeconds": command.timeout_seconds,
+            }
+            for command in discover_extension_commands()
+        ],
+        "skills": [
+            {
+                "name": skill.name,
+                "ref": skill.ref,
+                "description": skill.description,
+                "source": skill.source,
+                "path": str(skill.path),
+            }
+            for skill in discover_extension_skills()
+        ],
     }
 
 

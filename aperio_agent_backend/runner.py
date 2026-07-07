@@ -22,6 +22,7 @@ from .config import (
 )
 from .deepagents_engine import run_deep_agent
 from .event_protocol import normalize_event
+from .extensions import render_extension_command
 from .local_knowledge import build_project_knowledge_context
 from .memory import build_memory_context, record_run_memory
 from .scanner import compact_scan_summary, run_code_health_scan, write_compact_scan_summary
@@ -103,6 +104,25 @@ def run_agent(
     try:
         _emit_event(event_callback, {"type": "phase", "phase": "run_started", "message": "创建运行目录", "run_id": run_id})
         _raise_if_cancelled(cancel_event)
+        rendered_command = render_extension_command(
+            message,
+            approval_mode=approval_mode,
+            timeout_seconds=timeout_seconds,
+        )
+        if rendered_command is not None:
+            message = rendered_command.message
+            approval_mode = rendered_command.approval_mode
+            timeout_seconds = rendered_command.timeout_seconds
+            _emit_event(
+                event_callback,
+                {
+                    "type": "phase",
+                    "phase": "extension_command_loaded",
+                    "message": f"Loaded extension command {rendered_command.command.name}",
+                    "command": rendered_command.command.name,
+                    "source": rendered_command.command.source,
+                },
+            )
         route = _route_task(message)
         _emit_event(event_callback, {"type": "phase", "phase": "route_selected", "message": f"路由到 {route}", "route": route})
         code_project_path, code_target_rel, code_target_path, code_context_found = resolve_code_context(message)

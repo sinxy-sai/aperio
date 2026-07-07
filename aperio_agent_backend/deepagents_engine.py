@@ -30,6 +30,7 @@ from .config import (
 )
 from .hitl import build_interrupt_policy, resolve_human_interrupts
 from .event_protocol import normalize_event
+from .extensions import discover_runtime_extension_skill_refs
 from .middleware import (
     CodeHealthRawReadGuardMiddleware,
     FinalOutputGuardMiddleware,
@@ -69,6 +70,7 @@ def run_deep_agent(
         return "本次运行已停止。"
 
     skill_sources = AgentSkillSources(skills_root)
+    extension_skill_refs = discover_runtime_extension_skill_refs(skills_root)
     store = InMemoryStore()
     backend = CompositeBackend(
         default=FilesystemBackend(root_dir=str(run_root), virtual_mode=True),
@@ -134,6 +136,7 @@ def run_deep_agent(
         general_tools,
         telemetry,
         skill_sources,
+        extension_skill_refs,
         fallback_model,
         event_callback,
     )
@@ -410,6 +413,7 @@ def _compiled_general_agent(
     tools: list[Any],
     telemetry: RunTelemetry,
     skill_sources: AgentSkillSources,
+    extension_skill_refs: list[str],
     fallback_model: Any | None,
     event_callback: Any | None,
 ) -> dict[str, Any]:
@@ -426,7 +430,7 @@ def _compiled_general_agent(
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
-        skills=skill_sources.source("general-purpose", "shared/web-search"),
+        skills=skill_sources.source("general-purpose", "shared/web-search", *extension_skill_refs),
         system_prompt=_general_prompt(),
         name="general-purpose",
     )

@@ -265,6 +265,10 @@ def get_safe_execution_enabled() -> bool:
     return os.environ.get("APERIO_SAFE_EXECUTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def get_extensions_enabled() -> bool:
+    return os.environ.get("APERIO_EXTENSIONS_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def get_amap_api_key() -> str:
     return os.environ.get("AMAP_API_KEY", "").strip()
 

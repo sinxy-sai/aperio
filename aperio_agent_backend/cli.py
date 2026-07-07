@@ -39,6 +39,13 @@ from .config import (
     get_scan_sandbox_mode,
     save_default_config,
 )
+from .extensions import (
+    discover_extension_commands,
+    discover_extension_skills,
+    find_extension_command,
+    read_skill_metadata,
+    split_command_line,
+)
 from .local_knowledge import (
     knowledge_db_path,
     knowledge_enabled,
@@ -89,6 +96,7 @@ COMMAND_SPECS = [
     CommandSpec("/runs", "列出最近运行", "/runs [n]", aliases=("/ls",)),
     CommandSpec("/artifacts", "列出产物和 trace 文件", "/artifacts [run_id|last]", aliases=("/files",)),
     CommandSpec("/skills", "列出可用 skills", "/skills [filter]"),
+    CommandSpec("/commands", "列出项目/用户扩展命令", "/commands [filter]"),
     CommandSpec("/channels", "查看软件渠道配置状态"),
     CommandSpec("/last", "重新打印上次回答", aliases=("/answer",)),
     CommandSpec("/history", "查看当前 CLI 会话历史", "/history [n]"),
@@ -196,6 +204,11 @@ def _run_repl_message(message: str, state: ReplState) -> None:
 
 
 def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
+    raw_command, _ = split_command_line(command_line)
+    if raw_command and not _is_builtin_command(raw_command) and find_extension_command(raw_command):
+        _run_repl_message(command_line, state)
+        return None
+
     try:
         parts = shlex.split(command_line)
     except ValueError as exc:
@@ -228,6 +241,8 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
         _print_run_artifacts(args, state)
     elif command == "/skills":
         _print_skills(args)
+    elif command == "/commands":
+        _print_extension_commands(args)
     elif command == "/channels":
         _print_channels()
     elif command in {"/last", "/answer"}:
@@ -254,6 +269,11 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
     else:
         print(f"Unknown command: {command}. Type /help for commands.")
     return None
+
+
+def _is_builtin_command(name: str) -> bool:
+    normalized = name.strip().lower()
+    return any(normalized == spec.name or normalized in spec.aliases for spec in COMMAND_SPECS)
 
 
 def _set_approval_mode(args: list[str], state: ReplState) -> None:
@@ -557,6 +577,16 @@ def _command_completions(token: str) -> Any:
                 display=name,
                 display_meta=spec.usage or spec.description,
             )
+    for command in discover_extension_commands():
+        if command.name in seen or not command.name.startswith(token):
+            continue
+        seen.add(command.name)
+        yield Completion(
+            command.name,
+            start_position=-len(token),
+            display=command.name,
+            display_meta=command.description or f"{command.source}: {command.path}",
+        )
 
 
 def _skill_completions(token: str) -> Any:
@@ -587,7 +617,26 @@ def _print_skills(args: list[str]) -> None:
     print("Available skills:")
     for skill in skills:
         desc = f" - {skill['description']}" if skill["description"] else ""
-        print(f"  ${skill['name']}  ({skill['path']}){desc}")
+        source = f" [{skill['source']}]" if skill.get("source") else ""
+        print(f"  ${skill['name']}  ({skill['path']}){source}{desc}")
+
+
+def _print_extension_commands(args: list[str]) -> None:
+    query = " ".join(args).strip().lower()
+    commands = [
+        command for command in discover_extension_commands()
+        if not query
+        or query in command.name.lower()
+        or query in command.description.lower()
+        or query in str(command.path).lower()
+    ]
+    if not commands:
+        print("No extension commands found.")
+        return
+    print("Extension commands:")
+    for command in commands:
+        desc = f" - {command.description}" if command.description else ""
+        print(f"  {command.name:<24} [{command.source}] {command.path}{desc}")
 
 
 def _print_channels() -> None:
@@ -612,36 +661,26 @@ def _channel_configured(name: str, config: dict[str, Any]) -> bool:
 
 def _discover_skills() -> list[dict[str, str]]:
     root = packaged_skills_root()
-    if not root.exists():
-        return []
     skills: list[dict[str, str]] = []
-    for skill_file in sorted(root.rglob("SKILL.md")):
-        rel_dir = skill_file.parent.relative_to(root).as_posix()
-        metadata = _read_skill_metadata(skill_file)
-        name = metadata.get("name") or skill_file.parent.name
+    if root.exists():
+        for skill_file in sorted(root.rglob("SKILL.md")):
+            rel_dir = skill_file.parent.relative_to(root).as_posix()
+            metadata = read_skill_metadata(skill_file)
+            name = metadata.get("name") or skill_file.parent.name
+            skills.append({
+                "name": name,
+                "path": rel_dir,
+                "description": metadata.get("description", ""),
+                "source": "packaged",
+            })
+    for skill in discover_extension_skills():
         skills.append({
-            "name": name,
-            "path": rel_dir,
-            "description": metadata.get("description", ""),
+            "name": skill.name,
+            "path": skill.ref,
+            "description": skill.description,
+            "source": skill.source,
         })
     return skills
-
-
-def _read_skill_metadata(path: Path) -> dict[str, str]:
-    metadata: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return metadata
-    if not lines or lines[0].strip() != "---":
-        return metadata
-    for line in lines[1:40]:
-        if line.strip() == "---":
-            break
-        key, sep, value = line.partition(":")
-        if sep and key.strip() in {"name", "description"}:
-            metadata[key.strip()] = value.strip().strip("\"'")
-    return metadata
 
 
 def _print_artifacts(run_id: str, artifacts: Any) -> None:
@@ -789,6 +828,7 @@ def doctor() -> int:
     print(f"Install deps for scan: {'yes' if get_install_project_deps() else 'no'}")
     print(f"MCP tools: {'enabled' if get_enable_mcp_tools() else 'disabled'}")
     print(f"Channels:  {', '.join(get_enabled_channels()) or 'none'}")
+    print(f"Extensions: {len(discover_extension_commands())} commands, {len(discover_extension_skills())} skills")
     print(f"Amap key:  {'configured' if get_amap_api_key() else 'missing'}")
     print(f"Provider key: {'configured' if provider_key else 'missing'}")
     print(f"API key:   {'configured' if get_api_key() else 'missing'}")
@@ -801,6 +841,9 @@ def _print_repl_help() -> None:
         aliases = f" ({', '.join(spec.aliases)})" if spec.aliases else ""
         usage = spec.usage or spec.name
         print(f"  {usage:<26} {spec.description}{aliases}")
+    extension_commands = discover_extension_commands()
+    if extension_commands:
+        print(f"\nExtension commands: {len(extension_commands)} found. Use /commands to list them.")
     print("\n补全：输入 / 显示命令，输入 $ 显示 skills。其他输入会直接发送给 agent。")
 
 
