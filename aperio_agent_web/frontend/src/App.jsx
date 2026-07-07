@@ -13,8 +13,10 @@ import {
   Image,
   Menu,
   Minus,
+  MoreHorizontal,
   PanelRight,
   Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
   Settings,
@@ -30,6 +32,10 @@ import remarkGfm from "remark-gfm";
 const SESSION_STORE_KEY = "aperio.chat.sessions.v2";
 const LEGACY_SESSION_STORE_KEY = "aperio.chat.sessions.v1";
 const ACTIVE_SESSION_KEY = "aperio.chat.activeSession";
+
+function makeMessageId() {
+  return `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
 
 function newSession() {
   return {
@@ -106,6 +112,7 @@ function ChatPage({ navigate }) {
   const [attachments, setAttachments] = useState([]);
   const [dragActive, setDragActive] = useState(false);
   const composerRef = useRef(null);
+  const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const streamRef = useRef(null);
@@ -160,12 +167,36 @@ function ChatPage({ navigate }) {
     updateSessions((current) =>
       current.map((session) => {
         if (session.id !== targetId) return session;
-        const nextMessages = [...(session.messages || []), { role, text }];
+        const nextMessages = [...(session.messages || []), { id: makeMessageId(), role, text }];
         const title =
           session.title && session.title !== "新对话"
             ? session.title
             : text.slice(0, 28) || "新对话";
         return { ...session, messages: nextMessages, title, updatedAt: Date.now() };
+      }),
+    );
+  }
+
+  function editMessage(message) {
+    if (!message?.text) return;
+    setInput(message.text);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(message.text.length, message.text.length);
+    });
+  }
+
+  function deleteMessage(message, index) {
+    const targetId = activeSession?.id;
+    if (!targetId || !message || message.draft) return;
+    updateSessions((current) =>
+      current.map((session) => {
+        if (session.id !== targetId) return session;
+        const nextMessages = (session.messages || []).filter((item, itemIndex) => {
+          if (message.id) return item.id !== message.id;
+          return itemIndex !== index;
+        });
+        return { ...session, messages: nextMessages, updatedAt: Date.now() };
       }),
     );
   }
@@ -396,7 +427,7 @@ function ChatPage({ navigate }) {
   }
 
   const displayMessages = [...(activeSession?.messages || [])];
-  if (draftAssistant) displayMessages.push({ role: "assistant", text: draftAssistant });
+  if (draftAssistant) displayMessages.push({ id: "draft-assistant", role: "assistant", text: draftAssistant, draft: true });
 
   return (
     <main className={`shell ${railCollapsed ? "rail-collapsed" : ""} ${artifactsCollapsed ? "artifacts-collapsed" : ""}`}>
@@ -470,7 +501,13 @@ function ChatPage({ navigate }) {
         <div className="conversation">
           {!displayMessages.length && <Welcome onUse={setInput} />}
           {displayMessages.map((message, index) => (
-            <Message key={`${message.role}-${index}`} role={message.role} text={message.text} />
+            <Message
+              key={message.id || `${message.role}-${index}`}
+              message={message}
+              onCopy={copyText}
+              onDelete={() => deleteMessage(message, index)}
+              onEdit={() => editMessage(message)}
+            />
           ))}
         </div>
 
@@ -516,7 +553,7 @@ function ChatPage({ navigate }) {
               </div>
             </div>
           )}
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={handleComposerKeyDown} rows={4} placeholder="例如：为智慧校园导航助手写 PRD 并评审" />
+          <textarea ref={textareaRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={handleComposerKeyDown} rows={4} placeholder="例如：为智慧校园导航助手写 PRD 并评审" />
           <div className="composer-actions">
             <div className="composer-tools">
               <button type="button" onClick={() => fileInputRef.current?.click()} title="添加文件"><Paperclip size={17} />文件</button>
@@ -801,27 +838,66 @@ function Welcome({ onUse }) {
   );
 }
 
-function Message({ role, text }) {
+function Message({ message, onCopy, onDelete, onEdit }) {
+  const { role, text = "", draft } = message;
   const [copied, setCopied] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isUser = role === "user";
+  const canEdit = isUser && !draft;
+  const canDelete = !draft;
 
-  async function copyReply() {
-    await copyText(text);
+  async function copyMessage() {
+    await onCopy(text);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
 
+  function handleEdit() {
+    setMenuOpen(false);
+    onEdit();
+  }
+
+  function handleDelete() {
+    setMenuOpen(false);
+    onDelete();
+  }
+
   return (
     <article className={`message ${role}`}>
-      <div className="avatar">{role === "user" ? "ME" : "AI"}</div>
+      <div className="avatar">{isUser ? "ME" : "AI"}</div>
       <div className="message-content">
-        <div className="bubble">{text}</div>
-        {role === "assistant" && (
-          <div className="message-actions">
-            <button type="button" onClick={copyReply} title={copied ? "已复制" : "复制回复"} aria-label={copied ? "已复制" : "复制回复"}>
-              {copied ? <Check size={15} /> : <Copy size={15} />}
-            </button>
+        {isUser ? (
+          <div className="bubble">{text}</div>
+        ) : (
+          <div className="bubble markdown-bubble">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
           </div>
         )}
+        <div className="message-actions">
+          <button type="button" onClick={copyMessage} title={copied ? "已复制" : "复制"} aria-label={copied ? "已复制" : "复制"}>
+            {copied ? <Check size={15} /> : <Copy size={15} />}
+          </button>
+          {canEdit && (
+            <button type="button" onClick={handleEdit} title="编辑" aria-label="编辑">
+              <Pencil size={15} />
+            </button>
+          )}
+          {canDelete && (
+            <div className="message-menu-wrap">
+              <button type="button" onClick={() => setMenuOpen((value) => !value)} title="更多" aria-label="更多">
+                <MoreHorizontal size={16} />
+              </button>
+              {menuOpen && (
+                <div className="message-menu" role="menu">
+                  <button type="button" className="message-action-danger" onClick={handleDelete} role="menuitem">
+                    <Trash2 size={14} />
+                    <span>删除</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </article>
   );

@@ -108,6 +108,7 @@ def run_deep_agent(
         skill_sources,
         fallback_model,
         code_health_final_paths,
+        event_callback,
     )
     prd_agent = _compiled_prd_agent(
         model,
@@ -120,6 +121,7 @@ def run_deep_agent(
         skill_sources,
         fallback_model,
         prd_review_final_paths,
+        event_callback,
     )
     general_agent = _compiled_general_agent(
         model,
@@ -131,6 +133,7 @@ def run_deep_agent(
         telemetry,
         skill_sources,
         fallback_model,
+        event_callback,
     )
 
     router = create_deep_agent(
@@ -295,6 +298,7 @@ def _compiled_code_health_agent(
     skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
+    event_callback: Any | None,
 ) -> dict[str, Any]:
     agent = create_deep_agent(
         model=model,
@@ -315,7 +319,7 @@ def _compiled_code_health_agent(
         interrupt_on=interrupt_on,
         skills=skill_sources.source("code-health-orchestrator", "code-health/code-health-toolkit"),
         system_prompt=_code_health_prompt(),
-        subagents=_code_health_reviewers(telemetry, skill_sources, fallback_model, completed_paths),
+        subagents=_code_health_reviewers(telemetry, skill_sources, fallback_model, completed_paths, event_callback),
         name="code-health-orchestrator",
     )
     return {
@@ -336,6 +340,7 @@ def _compiled_prd_agent(
     skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
+    event_callback: Any | None,
 ) -> dict[str, Any]:
     web_tool_names = {str(getattr(tool, "name", "")) for tool in web_tools}
     agent = create_deep_agent(
@@ -364,7 +369,7 @@ def _compiled_prd_agent(
             "shared/web-search",
         ),
         system_prompt=_prd_prompt(),
-        subagents=_prd_reviewers(web_tools, telemetry, skill_sources, fallback_model, completed_paths),
+        subagents=_prd_reviewers(web_tools, telemetry, skill_sources, fallback_model, completed_paths, event_callback),
         name="prd-review-orchestrator",
     )
     return {
@@ -384,6 +389,7 @@ def _compiled_general_agent(
     telemetry: RunTelemetry,
     skill_sources: AgentSkillSources,
     fallback_model: Any | None,
+    event_callback: Any | None,
 ) -> dict[str, Any]:
     tool_names = {str(getattr(tool, "name", "")) for tool in tools}
     agent = create_deep_agent(
@@ -456,6 +462,7 @@ def _code_health_reviewers(
     skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
+    event_callback: Any | None,
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -565,6 +572,7 @@ def _prd_reviewers(
     skill_sources: AgentSkillSources,
     fallback_model: Any | None,
     completed_paths: set[str],
+    event_callback: Any | None,
 ) -> list[dict[str, Any]]:
     web_tool_names = {str(getattr(tool, "name", "")) for tool in web_tools}
     return [

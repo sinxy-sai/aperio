@@ -403,6 +403,7 @@ input {
 .message-actions {
   display: flex;
   align-items: center;
+  gap: 3px;
   min-height: 30px;
 }
 
@@ -422,6 +423,138 @@ input {
   border-color: var(--line);
   color: var(--ink);
   background: var(--panel);
+}
+
+.message.user .message-actions {
+  justify-content: flex-end;
+}
+
+.message-menu-wrap {
+  position: relative;
+}
+
+.message-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  min-width: 116px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 14px 38px rgba(32, 42, 58, 0.16);
+}
+
+.message-menu button {
+  display: flex;
+  width: 100%;
+  height: 34px;
+  justify-content: flex-start;
+  gap: 8px;
+  border-radius: 9px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.message-menu .message-action-danger {
+  color: #b42318;
+}
+
+.message-menu .message-action-danger:hover {
+  border-color: rgba(180, 35, 24, 0.16);
+  color: #981b12;
+  background: #fff3f0;
+}
+
+.markdown-bubble {
+  white-space: normal;
+}
+
+.markdown-bubble > :first-child {
+  margin-top: 0;
+}
+
+.markdown-bubble > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-bubble h1,
+.markdown-bubble h2,
+.markdown-bubble h3 {
+  margin: 0.75em 0 0.35em;
+  line-height: 1.35;
+}
+
+.markdown-bubble h1 {
+  font-size: 20px;
+}
+
+.markdown-bubble h2 {
+  font-size: 17px;
+}
+
+.markdown-bubble h3 {
+  font-size: 15px;
+}
+
+.markdown-bubble p,
+.markdown-bubble ul,
+.markdown-bubble ol,
+.markdown-bubble blockquote,
+.markdown-bubble table,
+.markdown-bubble pre {
+  margin: 0.55em 0;
+}
+
+.markdown-bubble ul,
+.markdown-bubble ol {
+  padding-left: 1.35em;
+}
+
+.markdown-bubble blockquote {
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+  padding-left: 10px;
+}
+
+.markdown-bubble code {
+  border-radius: 6px;
+  background: #e9edf2;
+  padding: 0.08em 0.32em;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.markdown-bubble pre {
+  max-width: 100%;
+  max-height: 320px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7f8fa;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.markdown-bubble pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-bubble table {
+  display: block;
+  width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+
+.markdown-bubble th,
+.markdown-bubble td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  vertical-align: top;
 }
 
 .composer {
