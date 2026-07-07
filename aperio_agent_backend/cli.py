@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+    from prompt_toolkit.document import Document
+except ImportError:  # pragma: no cover - fallback for minimal installs
+    PromptSession = None
+    CompleteEvent = None
+    Completer = object
+    Completion = None
+    Document = None
 
 from .config import (
     APERIO_HOME,
@@ -21,7 +33,16 @@ from .config import (
     get_model_name,
     get_scan_sandbox_mode,
 )
+from .resources import packaged_skills_root
 from .runner import run_agent
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    description: str
+    usage: str = ""
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass
@@ -31,6 +52,26 @@ class ReplState:
     last_message: str = ""
     last_result: Any | None = None
     history: list[dict[str, str]] = field(default_factory=list)
+
+
+COMMAND_SPECS = [
+    CommandSpec("/help", "查看命令", aliases=("/?",)),
+    CommandSpec("/exit", "退出 CLI", aliases=("/quit", "/q")),
+    CommandSpec("/doctor", "检查环境和配置"),
+    CommandSpec("/init", "创建 ~/.aperio/.env", "/init [--force]"),
+    CommandSpec("/config", "查看 CLI、模型和运行配置", aliases=("/status",)),
+    CommandSpec("/workspace", "显示运行工作区", aliases=("/pwd",)),
+    CommandSpec("/approval", "查看或设置审批模式", "/approval prompt|approve|reject"),
+    CommandSpec("/timeout", "查看或设置超时秒数", "/timeout <seconds>"),
+    CommandSpec("/runs", "列出最近运行", "/runs [n]", aliases=("/ls",)),
+    CommandSpec("/artifacts", "列出产物和 trace 文件", "/artifacts [run_id|last]", aliases=("/files",)),
+    CommandSpec("/skills", "列出可用 skills", "/skills [filter]"),
+    CommandSpec("/last", "重新打印上次回答", aliases=("/answer",)),
+    CommandSpec("/history", "查看当前 CLI 会话历史", "/history [n]"),
+    CommandSpec("/clear", "清空当前 CLI 会话历史"),
+    CommandSpec("/retry", "重新运行上一条 prompt"),
+    CommandSpec("/serve", "启动本地 Web UI", "/serve [port]", aliases=("/web",)),
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,15 +119,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def repl() -> int:
     state = ReplState()
-    print("Aperio Agent")
-    print("Type /help for commands, /exit to quit.")
-    print(f"Workspace: {WORKSPACE_ROOT}")
+    _print_welcome(state)
     if not get_api_key():
         print("Config: missing DEEPSEEK_API_KEY. Run `aperio init` first.")
+    session = _make_prompt_session()
 
     while True:
         try:
-            message = input("\naperio> ").strip()
+            message = _prompt(session).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -150,6 +190,8 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
         _print_recent_runs(_parse_limit(args, default=10, maximum=50))
     elif command in {"/artifacts", "/files"}:
         _print_run_artifacts(args, state)
+    elif command == "/skills":
+        _print_skills(args)
     elif command in {"/last", "/answer"}:
         _print_last_result(state)
     elif command == "/history":
@@ -267,6 +309,131 @@ def _print_history(state: ReplState, limit: int) -> None:
         print(f"{item['role']}: {text}")
 
 
+def _print_welcome(state: ReplState) -> None:
+    skills = _discover_skills()
+    print("Aperio Agent")
+    print("本地多 Agent 工作台。直接输入问题开始任务，输入 / 查看命令，输入 $ 查看 skills。")
+    print(f"Workspace: {WORKSPACE_ROOT}")
+    print(f"Model: {get_model_name()} | Approval: {state.approval_mode} | Timeout: {state.timeout_seconds}s")
+    if skills:
+        preview = ", ".join(skill["name"] for skill in skills[:4])
+        suffix = "" if len(skills) <= 4 else f" ... +{len(skills) - 4}"
+        print(f"Skills: {preview}{suffix}")
+    print("常用：/help  /skills  /doctor  /runs  /artifacts  /exit")
+
+
+def _make_prompt_session() -> Any:
+    if PromptSession is None:
+        return None
+    return PromptSession(
+        completer=AperioCompleter(),
+        complete_while_typing=True,
+        mouse_support=_mouse_support_enabled(),
+    )
+
+
+def _mouse_support_enabled() -> bool:
+    return os.environ.get("APERIO_CLI_MOUSE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _prompt(session: Any) -> str:
+    if session is None:
+        return input("\naperio> ")
+    return session.prompt("\naperio> ")
+
+
+class AperioCompleter(Completer):
+    def get_completions(self, document: Any, complete_event: Any) -> Any:
+        text = document.text_before_cursor
+        token = text.split()[-1] if text.split() else text
+        if token.startswith("/"):
+            yield from _command_completions(token)
+        elif token.startswith("$"):
+            yield from _skill_completions(token)
+
+
+def _command_completions(token: str) -> Any:
+    if Completion is None:
+        return
+    seen: set[str] = set()
+    for spec in COMMAND_SPECS:
+        for name in (spec.name, *spec.aliases):
+            if name in seen or not name.startswith(token):
+                continue
+            seen.add(name)
+            yield Completion(
+                name,
+                start_position=-len(token),
+                display=name,
+                display_meta=spec.usage or spec.description,
+            )
+
+
+def _skill_completions(token: str) -> Any:
+    if Completion is None:
+        return
+    query = token[1:].lower()
+    for skill in _discover_skills():
+        if query and query not in skill["name"].lower() and query not in skill["path"].lower():
+            continue
+        value = f"${skill['name']}"
+        yield Completion(
+            value,
+            start_position=-len(token),
+            display=value,
+            display_meta=skill["description"] or skill["path"],
+        )
+
+
+def _print_skills(args: list[str]) -> None:
+    query = " ".join(args).strip().lower()
+    skills = [
+        skill for skill in _discover_skills()
+        if not query or query in skill["name"].lower() or query in skill["path"].lower() or query in skill["description"].lower()
+    ]
+    if not skills:
+        print("No skills found.")
+        return
+    print("Available skills:")
+    for skill in skills:
+        desc = f" - {skill['description']}" if skill["description"] else ""
+        print(f"  ${skill['name']}  ({skill['path']}){desc}")
+
+
+def _discover_skills() -> list[dict[str, str]]:
+    root = packaged_skills_root()
+    if not root.exists():
+        return []
+    skills: list[dict[str, str]] = []
+    for skill_file in sorted(root.rglob("SKILL.md")):
+        rel_dir = skill_file.parent.relative_to(root).as_posix()
+        metadata = _read_skill_metadata(skill_file)
+        name = metadata.get("name") or skill_file.parent.name
+        skills.append({
+            "name": name,
+            "path": rel_dir,
+            "description": metadata.get("description", ""),
+        })
+    return skills
+
+
+def _read_skill_metadata(path: Path) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return metadata
+    if not lines or lines[0].strip() != "---":
+        return metadata
+    for line in lines[1:40]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in {"name", "description"}:
+            metadata[key.strip()] = value.strip().strip("\"'")
+    return metadata
+
+
 def _print_artifacts(run_id: str, artifacts: Any) -> None:
     if not artifacts:
         return
@@ -381,26 +548,12 @@ def doctor() -> int:
 
 
 def _print_repl_help() -> None:
-    print(
-        "Commands:\n"
-        "  /help, /?                 Show this help\n"
-        "  /exit, /quit, /q          Quit\n"
-        "  /doctor                   Check environment and config\n"
-        "  /init [--force]           Create ~/.aperio/.env\n"
-        "  /config, /status          Show CLI and model status\n"
-        "  /workspace, /pwd          Show the run workspace\n"
-        "  /approval [mode]          Show or set prompt|approve|reject\n"
-        "  /timeout [seconds]        Show or set agent timeout\n"
-        "  /runs [n], /ls [n]        List recent runs\n"
-        "  /artifacts [run_id|last]  List run artifacts and trace files\n"
-        "  /last, /answer            Print the last answer again\n"
-        "  /history [n]              Show in-memory CLI conversation history\n"
-        "  /clear                    Clear in-memory CLI history\n"
-        "  /retry                    Rerun the previous prompt\n"
-        "  /serve [port], /web [p]   Start the local Web UI\n"
-        "\n"
-        "Any other input is sent to the agent. Use quotes for command args with spaces."
-    )
+    print("Commands:")
+    for spec in COMMAND_SPECS:
+        aliases = f" ({', '.join(spec.aliases)})" if spec.aliases else ""
+        usage = spec.usage or spec.name
+        print(f"  {usage:<26} {spec.description}{aliases}")
+    print("\n补全：输入 / 显示命令，输入 $ 显示 skills。其他输入会直接发送给 agent。")
 
 
 if __name__ == "__main__":

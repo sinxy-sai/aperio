@@ -53,6 +53,19 @@ Start interactive chat:
 aperio
 ```
 
+The interactive CLI shows a short welcome panel with the active workspace, model, approval mode, and packaged skills. With `prompt-toolkit` installed, typing `/` opens command completion and typing `$` opens skill completion. Keyboard navigation with arrow keys, Tab, and Enter works everywhere. If you want clickable completion menus and your terminal supports mouse events, set `APERIO_CLI_MOUSE=1`; this may make terminal scrollback follow the prompt in some shells.
+
+Useful interactive commands:
+
+```text
+/help       Show commands
+/skills     List packaged skills
+/doctor     Check environment and config
+/runs       List recent runs
+/artifacts  List artifacts for the last run
+/exit       Quit
+```
+
 Run one prompt:
 
 ```powershell
