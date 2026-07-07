@@ -26,12 +26,25 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "katex/dist/katex.min.css";
 import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 const SESSION_STORE_KEY = "aperio.chat.sessions.v2";
 const LEGACY_SESSION_STORE_KEY = "aperio.chat.sessions.v1";
 const ACTIVE_SESSION_KEY = "aperio.chat.activeSession";
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
+const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
+
+function normalizeMathDelimiters(text) {
+  return String(text || "")
+    .replace(/\\\[/g, "$$\n")
+    .replace(/\\\]/g, "\n$$")
+    .replace(/\\\(/g, "$")
+    .replace(/\\\)/g, "$");
+}
 
 function makeMessageId() {
   return `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
@@ -870,7 +883,9 @@ function Message({ message, onCopy, onDelete, onEdit }) {
           <div className="bubble">{text}</div>
         ) : (
           <div className="bubble markdown-bubble">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}>
+              {normalizeMathDelimiters(text)}
+            </ReactMarkdown>
           </div>
         )}
         <div className="message-actions">
@@ -951,7 +966,9 @@ function ArtifactCard({ runId, artifact }) {
       </div>
       {isMarkdown ? (
         <div className="markdown-preview">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact.preview || ""}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}>
+            {normalizeMathDelimiters(artifact.preview)}
+          </ReactMarkdown>
         </div>
       ) : (
         <pre>{artifact.preview || "(empty)"}</pre>

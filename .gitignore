@@ -21,6 +21,12 @@ build/
 Thumbs.db
 
 # Environment
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
 .env.local
 .env.*.local
 
@@ -35,6 +41,11 @@ htmlcov/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Runtime logs / local workspaces
+*.log
+aperio_agent_backend/workspace/
+hatch_pet_runs/
 
 # Large data
 *.db

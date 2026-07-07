@@ -557,6 +557,24 @@ input {
   vertical-align: top;
 }
 
+.markdown-bubble .math,
+.markdown-preview .math {
+  max-width: 100%;
+}
+
+.markdown-bubble .katex-display,
+.markdown-preview .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+}
+
+.markdown-bubble .katex,
+.markdown-preview .katex {
+  font-size: 1.02em;
+}
+
 .composer {
   position: relative;
   width: min(960px, calc(100% - 36px));
