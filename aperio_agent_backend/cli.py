@@ -39,7 +39,16 @@ from .config import (
     get_scan_sandbox_mode,
     save_default_config,
 )
-from .memory import add_memory, delete_memory, list_memories, memory_db_path, memory_enabled, search_memories
+from .memory import (
+    add_memory,
+    clear_memories,
+    delete_memory,
+    list_memories,
+    memory_db_path,
+    memory_enabled,
+    search_memories,
+    update_memory,
+)
 from .resources import packaged_skills_root
 from .runner import run_agent
 
@@ -359,6 +368,13 @@ def _handle_memory_command(args: list[str]) -> None:
         item = add_memory(kind="manual", content=content)
         print(f"Added memory #{item.id}" if item else "Memory is disabled or empty.")
         return
+    if action in {"update", "edit"}:
+        if len(args) < 3 or not args[1].isdigit():
+            print("Usage: /memory update <id> <content>")
+            return
+        item = update_memory(int(args[1]), content=" ".join(args[2:]).strip())
+        print(f"Updated memory #{item.id}" if item else "Memory not found or content is empty.")
+        return
     if action in {"delete", "del", "remove", "rm"}:
         if len(args) < 2 or not args[1].isdigit():
             print("Usage: /memory delete <id>")
@@ -366,10 +382,27 @@ def _handle_memory_command(args: list[str]) -> None:
         ok = delete_memory(int(args[1]))
         print("Deleted." if ok else "Memory not found.")
         return
+    if action == "clear":
+        if "--yes" not in args:
+            print("This deletes matching memories. Usage: /memory clear --yes [scope=<scope>] [kind=<kind>]")
+            return
+        deleted = clear_memories(scope=_option_value(args, "scope"), kind=_option_value(args, "kind"))
+        print(f"Deleted {deleted} memories.")
+        return
+    if action == "export":
+        target = Path(args[1]).expanduser() if len(args) > 1 else memory_db_path().with_suffix(".json")
+        memories = list_memories(limit=200)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps([_memory_export_dict(item) for item in memories], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"Exported {len(memories)} memories to {target}")
+        return
     if action.isdigit():
         _print_memories(int(action))
         return
-    print("Usage: /memory [n] | /memory search <query> | /memory add <content> | /memory delete <id> | /memory path")
+    print("Usage: /memory [n] | /memory search <query> | /memory add <content> | /memory update <id> <content> | /memory delete <id> | /memory clear --yes | /memory export [path] | /memory path")
 
 
 def _print_memories(limit: int) -> None:
@@ -387,6 +420,28 @@ def _print_memory_items(items: list[Any]) -> None:
             text = text[:157] + "..."
         key = f" {item.key}" if item.key else ""
         print(f"#{item.id} [{item.scope}/{item.kind}{key}] {text}")
+
+
+def _option_value(args: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for arg in args:
+        if arg.startswith(prefix):
+            value = arg[len(prefix):].strip()
+            return value or None
+    return None
+
+
+def _memory_export_dict(item: Any) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "scope": item.scope,
+        "kind": item.kind,
+        "key": item.key,
+        "content": item.content,
+        "metadata": item.metadata,
+        "createdAt": item.created_at,
+        "updatedAt": item.updated_at,
+    }
 
 
 def _print_welcome(state: ReplState) -> None:

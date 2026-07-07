@@ -575,6 +575,195 @@ input {
   font-size: 1.02em;
 }
 
+.memory-shell {
+  display: grid;
+  width: 100vw;
+  height: 100dvh;
+  grid-template-columns: 320px minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.memory-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 72px 1fr;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.memory-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.memory-health {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+}
+
+.memory-health svg {
+  color: var(--green);
+}
+
+.memory-health div,
+.memory-add {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memory-health span,
+.memory-status,
+.memory-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memory-health span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-add {
+  align-content: start;
+  margin: 14px 18px 0;
+}
+
+.memory-add textarea,
+.memory-edit {
+  min-height: 110px;
+  border-radius: 12px;
+  box-shadow: none;
+  resize: vertical;
+}
+
+.memory-form-row,
+.memory-searchbar {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-form-row {
+  grid-template-columns: 1fr 1fr;
+}
+
+.memory-primary,
+.memory-searchbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  min-height: 38px;
+  border-radius: 11px;
+  color: #fff;
+  background: var(--green);
+  padding: 0 14px;
+  font-weight: 800;
+}
+
+.memory-primary:disabled,
+.memory-searchbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.memory-searchbar {
+  grid-template-columns: minmax(180px, 1fr) 160px 160px 96px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.memory-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  padding: 0 12px;
+}
+
+.memory-search input {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.memory-status {
+  margin: 6px 2px 12px;
+}
+
+.memory-list {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px;
+}
+
+.memory-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-card-head > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.memory-card p {
+  color: #252b33;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memory-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.memory-card-actions button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--soft);
+}
+
+.memory-card-actions button:hover {
+  color: var(--ink);
+  background: #e6eaf0;
+}
+
+.ghost.danger {
+  color: var(--red);
+}
+
 .composer {
   position: relative;
   width: min(960px, calc(100% - 36px));

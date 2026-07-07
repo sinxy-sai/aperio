@@ -140,6 +140,65 @@ def delete_memory(memory_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def update_memory(
+    memory_id: int,
+    *,
+    kind: str | None = None,
+    content: str | None = None,
+    scope: str | None = None,
+    key: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> MemoryItem | None:
+    if not memory_enabled():
+        return None
+    existing = get_memory(memory_id)
+    if existing is None:
+        return None
+
+    next_content = existing.content if content is None else _sanitize(content)
+    if not next_content:
+        return None
+    next_metadata = existing.metadata if metadata is None else metadata
+    now = time.time()
+    db = _connect()
+    with db:
+        db.execute(
+            """
+            update memories
+            set scope = ?, kind = ?, key = ?, content = ?, metadata_json = ?, updated_at = ?
+            where id = ?
+            """,
+            (
+                (scope if scope is not None else existing.scope).strip() or "project",
+                (kind if kind is not None else existing.kind).strip() or "note",
+                (key if key is not None else existing.key).strip(),
+                next_content,
+                json.dumps(next_metadata or {}, ensure_ascii=False),
+                now,
+                memory_id,
+            ),
+        )
+    return get_memory(memory_id)
+
+
+def clear_memories(*, scope: str | None = None, kind: str | None = None) -> int:
+    if not memory_enabled():
+        return 0
+    clauses: list[str] = []
+    params: list[Any] = []
+    if scope:
+        clauses.append("scope = ?")
+        params.append(scope)
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    where = f" where {' and '.join(clauses)}" if clauses else ""
+    db = _connect()
+    with db:
+        cursor = db.execute(f"delete from memories{where}", params)
+    return int(cursor.rowcount or 0)
+
+
 def build_memory_context(*, query: str = "", limit: int = 8) -> dict[str, Any]:
     if not memory_enabled():
         return {"enabled": False, "items": [], "markdown": ""}

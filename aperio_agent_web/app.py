@@ -28,7 +28,15 @@ from aperio_agent_backend.config import (
     get_model_name,
     get_scan_sandbox_mode,
 )
-from aperio_agent_backend.memory import add_memory, delete_memory, list_memories, memory_db_path, memory_enabled
+from aperio_agent_backend.memory import (
+    add_memory,
+    clear_memories,
+    delete_memory,
+    list_memories,
+    memory_db_path,
+    memory_enabled,
+    update_memory,
+)
 from aperio_agent_backend.runner import UploadedInput, read_artifacts, run_agent, safe_artifact_path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -55,6 +63,13 @@ class MemoryRequest(BaseModel):
     key: str = Field(default="", max_length=200)
 
 
+class MemoryUpdateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    kind: str | None = Field(default=None, max_length=80)
+    scope: str | None = Field(default=None, max_length=80)
+    key: str | None = Field(default=None, max_length=200)
+
+
 app = FastAPI(title="Aperio Agent Web")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -71,6 +86,13 @@ def observability() -> str:
     if REACT_INDEX.exists():
         return REACT_INDEX.read_text(encoding="utf-8")
     return (STATIC_DIR / "observability.html").read_text(encoding="utf-8")
+
+
+@app.get("/memory", response_class=HTMLResponse)
+def memory_page() -> str:
+    if REACT_INDEX.exists():
+        return REACT_INDEX.read_text(encoding="utf-8")
+    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/api/health")
@@ -115,6 +137,26 @@ def create_memory(request: MemoryRequest) -> dict[str, Any]:
 @app.delete("/api/memories/{memory_id}")
 def remove_memory(memory_id: int) -> dict[str, Any]:
     return {"ok": delete_memory(memory_id), "memoryId": memory_id}
+
+
+@app.patch("/api/memories/{memory_id}")
+def patch_memory(memory_id: int, request: MemoryUpdateRequest) -> dict[str, Any]:
+    item = update_memory(
+        memory_id,
+        kind=request.kind,
+        scope=request.scope,
+        key=request.key,
+        content=request.content,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Memory not found or content is empty")
+    return {"ok": True, "memory": _memory_item_dict(item)}
+
+
+@app.post("/api/memories/clear")
+def clear_memory_items(scope: str | None = None, kind: str | None = None) -> dict[str, Any]:
+    deleted = clear_memories(scope=scope, kind=kind)
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/chat")

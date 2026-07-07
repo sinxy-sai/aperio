@@ -1,11 +1,13 @@
 import {
   Activity,
   ArrowLeft,
+  Brain,
   ChevronRight,
   CloudSun,
   CodeXml,
   Check,
   Copy,
+  Database,
   File as FileIcon,
   FileText,
   Folder,
@@ -19,6 +21,8 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Save,
+  Search,
   Settings,
   Square,
   Trash2,
@@ -107,6 +111,8 @@ function App() {
 
   return path.startsWith("/observability") ? (
     <ObservabilityPage navigate={navigate} />
+  ) : path.startsWith("/memory") ? (
+    <MemoryPage navigate={navigate} />
   ) : (
     <ChatPage navigate={navigate} />
   );
@@ -411,6 +417,10 @@ function ChatPage({ navigate }) {
     navigate(`/observability${params.toString() ? `?${params}` : ""}`);
   }
 
+  function openMemory() {
+    navigate("/memory");
+  }
+
   async function refreshArtifacts() {
     let runId = selectedRunId;
     if (!runId) {
@@ -597,6 +607,10 @@ function ChatPage({ navigate }) {
           <Activity size={20} />
           <span>观测平台</span>
         </button>
+        <button className="nav-primary nav-link" type="button" onClick={openMemory}>
+          <Brain size={20} />
+          <span>Memory</span>
+        </button>
 
         <div className="nav-section">
           <p>快捷任务</p>
@@ -753,6 +767,189 @@ function ChatPage({ navigate }) {
           )}
         </div>
       </aside>
+    </main>
+  );
+}
+
+function MemoryPage({ navigate }) {
+  const [health, setHealth] = useState(null);
+  const [memories, setMemories] = useState([]);
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState("");
+  const [kind, setKind] = useState("");
+  const [content, setContent] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editingContent, setEditingContent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    fetch("/api/health").then((response) => response.json()).then(setHealth).catch((error) => setHealth({ ok: false, error: error.message }));
+    void loadMemories();
+  }, []);
+
+  async function loadMemories(overrides = {}) {
+    const nextQuery = overrides.query ?? query;
+    const nextScope = overrides.scope ?? scope;
+    const nextKind = overrides.kind ?? kind;
+    const params = new URLSearchParams({ limit: "100" });
+    if (nextQuery) params.set("q", nextQuery);
+    if (nextScope) params.set("scope", nextScope);
+    if (nextKind) params.set("kind", nextKind);
+    const data = await fetchJson(`/api/memories?${params}`);
+    setMemories(data.memories || []);
+    setStatus(`${data.memories?.length || 0} memories`);
+  }
+
+  async function addManualMemory(event) {
+    event.preventDefault();
+    if (!content.trim()) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/memories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: content.trim(), kind: kind || "manual", scope: scope || "project" }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setContent("");
+      await loadMemories();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveMemory(memory) {
+    if (!editingContent.trim()) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(memory.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: editingContent.trim() }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setEditingId(null);
+      setEditingContent("");
+      await loadMemories();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeMemory(memory) {
+    if (!window.confirm(`Delete memory #${memory.id}? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await loadMemories();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearVisibleMemories() {
+    const filterLabel = [scope && `scope=${scope}`, kind && `kind=${kind}`].filter(Boolean).join(", ") || "all";
+    if (!window.confirm(`Clear ${filterLabel} memories? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const params = new URLSearchParams();
+      if (scope) params.set("scope", scope);
+      if (kind) params.set("kind", kind);
+      const response = await fetch(`/api/memories/clear${params.toString() ? `?${params}` : ""}`, { method: "POST" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await loadMemories();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEdit(memory) {
+    setEditingId(memory.id);
+    setEditingContent(memory.content || "");
+  }
+
+  return (
+    <main className="memory-shell">
+      <aside className="observe-rail">
+        <div className="rail-head">
+          <Brand subtitle="Memory" />
+          <button className="ghost-link" type="button" onClick={() => navigate("/")}><ArrowLeft size={17} />Back to Chat</button>
+        </div>
+        <div className="memory-health">
+          <Database size={18} />
+          <div>
+            <strong>{health?.memoryEnabled ? "Memory enabled" : "Memory disabled"}</strong>
+            <span>{health?.memoryDb || "Loading database path"}</span>
+          </div>
+        </div>
+        <form className="memory-add" onSubmit={addManualMemory}>
+          <label htmlFor="memoryContent">Add memory</label>
+          <textarea id="memoryContent" value={content} onChange={(event) => setContent(event.target.value)} rows={6} placeholder="Stable preference, project fact, or reusable note..." />
+          <div className="memory-form-row">
+            <input value={scope} onChange={(event) => setScope(event.target.value)} placeholder="scope: project" />
+            <input value={kind} onChange={(event) => setKind(event.target.value)} placeholder="kind: manual" />
+          </div>
+          <button className="memory-primary" type="submit" disabled={busy || !content.trim()}><Plus size={16} />Add</button>
+        </form>
+      </aside>
+
+      <section className="memory-main">
+        <header className="observe-topbar">
+          <div>
+            <p className="eyebrow">Persistent Memory</p>
+            <h2>Memory 管理</h2>
+          </div>
+          <div className="observe-actions">
+            <button className="ghost" type="button" onClick={() => void loadMemories()} disabled={busy}><RefreshCw size={16} />Refresh</button>
+            <button className="ghost danger" type="button" onClick={clearVisibleMemories} disabled={busy || !memories.length}><Trash2 size={16} />Clear</button>
+          </div>
+        </header>
+
+        <div className="memory-content">
+          <section className="memory-searchbar">
+            <div className="memory-search">
+              <Search size={18} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "Enter") void loadMemories();
+              }} placeholder="Search memory..." />
+            </div>
+            <input value={scope} onChange={(event) => setScope(event.target.value)} placeholder="scope filter" />
+            <input value={kind} onChange={(event) => setKind(event.target.value)} placeholder="kind filter" />
+            <button type="button" onClick={() => void loadMemories()} disabled={busy}>Search</button>
+          </section>
+
+          <div className="memory-status">{status || "Ready"}</div>
+          <section className="memory-list">
+            {!memories.length ? (
+              <div className="empty-state">No memories found.</div>
+            ) : memories.map((memory) => (
+              <article className="memory-card" key={memory.id}>
+                <div className="memory-card-head">
+                  <div>
+                    <strong>#{memory.id} {memory.key || memory.kind}</strong>
+                    <span>{memory.scope} / {memory.kind} · {formatDateTime(memory.updatedAt)}</span>
+                  </div>
+                  <div className="memory-card-actions">
+                    {editingId === memory.id ? (
+                      <button type="button" onClick={() => void saveMemory(memory)} disabled={busy}><Save size={15} /></button>
+                    ) : (
+                      <button type="button" onClick={() => startEdit(memory)}><Pencil size={15} /></button>
+                    )}
+                    <button type="button" onClick={() => void removeMemory(memory)} disabled={busy}><Trash2 size={15} /></button>
+                  </div>
+                </div>
+                {editingId === memory.id ? (
+                  <textarea className="memory-edit" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} rows={5} />
+                ) : (
+                  <p>{memory.content}</p>
+                )}
+              </article>
+            ))}
+          </section>
+        </div>
+      </section>
     </main>
   );
 }
@@ -1403,6 +1600,17 @@ async function readNdjson(body, onEvent) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function formatDateTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "unknown time";
+  return new Date(timestamp * 1000).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function formatTokenCount(tokens, modelCalls = 0) {
