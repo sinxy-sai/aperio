@@ -44,7 +44,7 @@ APERIO_TOOL_CALL_LIMIT=160
 APERIO_MODEL_MAX_RETRIES=3
 APERIO_TOOL_MAX_RETRIES=2
 APERIO_INSTALL_PROJECT_DEPS=0
-APERIO_SCAN_SANDBOX=host
+APERIO_SCAN_SANDBOX=auto
 APERIO_ENABLE_MCP=0
 AMAP_API_KEY=
 FEISHU_APP_ID=
@@ -152,7 +152,7 @@ aperio doctor
 
 The default engine is `deepagents`, which runs a package-native DeepAgents router with PRD, code-health, and general-purpose subagents. Set `APERIO_ENGINE=lite` for the simpler fallback engine.
 
-Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it scans on the host and does not install project dependencies. Set `APERIO_SCAN_SANDBOX=docker` to run the scanner in the packaged Docker sandbox, or `auto` to try Docker and fall back to host scanning.
+Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it tries the packaged Docker sandbox first and falls back to host scanning if Docker is unavailable. Set `APERIO_SCAN_SANDBOX=host` to force host-only scanning, or `APERIO_SCAN_SANDBOX=docker` to require Docker.
 
 DeepAgents runs on a routed workspace backend. Inputs, outputs, local policy files, packaged skills, per-agent skill views, memory, and temp state are separated by virtual paths, and each subagent receives only its assigned read-only skill source.
 

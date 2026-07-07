@@ -24,7 +24,7 @@ APERIO_TOOL_CALL_LIMIT=160
 APERIO_MODEL_MAX_RETRIES=3
 APERIO_TOOL_MAX_RETRIES=2
 APERIO_INSTALL_PROJECT_DEPS=0
-APERIO_SCAN_SANDBOX=host
+APERIO_SCAN_SANDBOX=auto
 APERIO_ENABLE_MCP=0
 AMAP_API_KEY=
 ```
@@ -91,7 +91,7 @@ aperio_agent_backend/workspace/<run_id>/
 
 默认使用 `APERIO_ENGINE=deepagents`，会运行包内 DeepAgents router 和子 agent。也可以设置 `APERIO_ENGINE=lite` 使用轻量 fallback。
 
-代码健康报告默认在 host 环境运行包内迁移的 `code-health-toolkit`，把确定性扫描结果写入 `outputs/code_health/raw/tool_results.json`，再交给 DeepAgents 子 agent 生成报告。默认不安装项目依赖；如果当前环境安装了 `ruff`、`mypy`、`bandit`、`radon`、`detect-secrets` 等工具，会自动纳入扫描证据。
+代码健康报告默认优先在 Docker 沙盒里运行包内迁移的 `code-health-toolkit`，Docker 不可用时回退到 host 环境，把确定性扫描结果写入 `outputs/code_health/raw/tool_results.json`，再交给 DeepAgents 子 agent 生成报告。默认不安装项目依赖；如果扫描环境安装了 `ruff`、`mypy`、`bandit`、`radon`、`detect-secrets` 等工具，会自动纳入扫描证据。
 
 DeepAgents 运行时使用 `CompositeBackend` 隔离虚拟路径：`/inputs`、`/outputs`、`/local-resources`、`/skills`、`/agent-skills`、`/memories` 和 `/temp` 分别路由到不同 backend。`/agent-skills` 是只读的 per-agent skill 视图，每个子 agent 只能自动加载分配给自己的 skill。
 

@@ -516,11 +516,21 @@ function ChatPage({ navigate }) {
     setRunMeta("agent 正在处理");
     setTraceEvents([]);
     patchSessionById(targetSessionId, { traceEvents: [] }, { persistNow: true });
-    const stream = { controller: new AbortController(), runId: "", stopped: false, sessionId: targetSessionId };
+    const reusableRunId = activeSession?.runId || "";
+    const stream = {
+      controller: new AbortController(),
+      runId: reusableRunId,
+      stopped: false,
+      sessionId: targetSessionId,
+      liveEvents: [],
+    };
     streamRef.current = stream;
 
     try {
-      const response = await fetch("/api/chat/stream", requestBody(message, approvalMode, timeoutSeconds, pendingAttachments, stream.controller.signal));
+      const response = await fetch(
+        "/api/chat/stream",
+        requestBody(message, approvalMode, timeoutSeconds, pendingAttachments, stream.controller.signal, reusableRunId),
+      );
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `HTTP ${response.status}`);
@@ -535,20 +545,25 @@ function ChatPage({ navigate }) {
           patchSessionById(targetSessionId, { runId: eventRunId }, { persistNow: true });
         }
         if (eventData.type === "status") {
-          setSessionDraft(targetSessionId, eventData.message || "agent 正在运行");
-          setDraftAssistant(eventData.message || "agent 正在运行");
+          const statusText = stream.liveEvents.length
+            ? formatLiveTraceSummary(stream.liveEvents, eventData.elapsed)
+            : eventData.message || "agent 正在运行";
+          setSessionDraft(targetSessionId, statusText);
+          setDraftAssistant(statusText);
           setRunMeta(`运行中 · ${Number(eventData.elapsed || 0).toFixed(1)}s`);
           return;
         }
         if (eventData.type === "trace") {
           const traceEvent = normalizeTraceEvent(eventData.event);
-          setSessionDraft(targetSessionId, formatLiveTrace(traceEvent));
+          stream.liveEvents = [...stream.liveEvents.slice(-5), traceEvent];
+          const liveDraft = formatLiveTraceSummary(stream.liveEvents);
+          setSessionDraft(targetSessionId, liveDraft);
           setTraceEvents((current) => {
             const nextEvents = [...current.slice(-119), traceEvent];
             patchSessionById(targetSessionId, { traceEvents: nextEvents }, { persistNow: true });
             return nextEvents;
           });
-          setDraftAssistant(formatLiveTrace(traceEvent));
+          setDraftAssistant(liveDraft);
           return;
         }
         if (eventData.type === "cancelled") {
@@ -1534,7 +1549,18 @@ function formatLiveTrace(event) {
   return meta && meta !== title ? `${title} · ${meta}` : title;
 }
 
-function requestBody(message, approvalMode, timeoutSeconds, attachments, signal) {
+function formatLiveTraceSummary(events, elapsed = null) {
+  const items = (events || []).slice(-6);
+  const elapsedLine = elapsed == null ? "" : `，已耗时 ${Number(elapsed || 0).toFixed(1)}s`;
+  if (!items.length) return `agent 正在运行${elapsedLine}`;
+  const lines = items.map((event) => {
+    const label = event.type === "model" ? "模型" : event.type === "tool" ? "工具" : event.type === "artifact" ? "产物" : "阶段";
+    return `- **${label}** ${formatLiveTrace(event)}`;
+  });
+  return [`agent 正在运行${elapsedLine}`, "", ...lines].join("\n");
+}
+
+function requestBody(message, approvalMode, timeoutSeconds, attachments, signal, runId = "") {
   if (!attachments.length) {
     return {
       method: "POST",
@@ -1544,6 +1570,7 @@ function requestBody(message, approvalMode, timeoutSeconds, attachments, signal)
         message,
         approval_mode: approvalMode,
         timeout_seconds: Number(timeoutSeconds || 900),
+        run_id: runId || "",
       }),
     };
   }
@@ -1552,6 +1579,7 @@ function requestBody(message, approvalMode, timeoutSeconds, attachments, signal)
   form.append("message", message);
   form.append("approval_mode", approvalMode);
   form.append("timeout_seconds", String(Number(timeoutSeconds || 900)));
+  if (runId) form.append("run_id", runId);
   for (const item of attachments) {
     form.append("files", item.file, item.path);
     form.append("paths", item.path);

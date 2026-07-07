@@ -461,14 +461,15 @@ def _code_health_prompt() -> str:
    - /outputs/code_health/drafts/security.md
    - /outputs/code_health/drafts/dependencies.md
    - /outputs/code_health/drafts/documentation.md
-3. 四个草稿完成后，委托 summarizer 合并最终报告。
+3. 委托 summarizer 之前，必须用 read_file 逐一确认四个草稿都能读取且不是空文件；缺失任一草稿时，必须先补跑对应子 agent，不能进入最终汇总。
 4. 最终产物只能写入 /outputs/code_health/code_health_report.md。必须实际调用 write_file 写入该路径；只在聊天里说明不算完成。
 
 硬性约束：
 - 全文使用中文；工具名、文件路径、命令、错误码可以保留英文。
 - 优先引用 tool_results.json 中的事实。工具跳过、不可用、超时都必须作为覆盖限制，不要写成“无问题”。
 - 不要声称已经运行 Docker、SAST、测试、依赖审计或联网搜索，除非 tool_results.json 明确包含对应成功结果。
-- 不要写 HTML、JSON 可视化或别名报告。"""
+- 不要写 HTML、JSON 可视化或别名报告。
+- 如果四个草稿无法全部生成，最终回答必须明确说明缺失项，且不要把本次审查描述为完整通过。"""
 
 
 def _code_health_reviewers(
@@ -549,6 +550,7 @@ def _code_health_reviewers(
 - /outputs/code_health/drafts/documentation.md
 
 按 report-writing-code-health skill 的结构生成最终报告。必须调用 write_file 写入 /outputs/code_health/code_health_report.md；只回复报告正文但不写文件视为失败。
+如果任一草稿缺失或无法读取，先停止并要求编排器补齐，不要自行跳过该草稿生成完整报告。
 完成写入后停止，不要创建其他最终报告。""",
         },
     ]

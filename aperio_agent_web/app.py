@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
@@ -55,6 +56,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
     approval_mode: str = Field(default="approve")
     timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    run_id: str = Field(default="", max_length=80)
 
 
 class MemoryRequest(BaseModel):
@@ -164,11 +166,13 @@ def clear_memory_items(scope: str | None = None, kind: str | None = None) -> dic
 async def chat(request: Request) -> dict[str, Any]:
     chat_request, uploaded_inputs = await _parse_chat_request(request)
     approval_mode = _validate_approval_mode(chat_request.approval_mode)
+    run_id = _coerce_reusable_run_id(chat_request.run_id) or None
     result = run_agent(
         message=chat_request.message,
         approval_mode=approval_mode,
         timeout_seconds=chat_request.timeout_seconds,
         uploaded_inputs=uploaded_inputs,
+        run_id=run_id,
     )
     return result.to_dict()
 
@@ -177,7 +181,9 @@ async def chat(request: Request) -> dict[str, Any]:
 async def chat_stream(request: Request) -> StreamingResponse:
     chat_request, uploaded_inputs = await _parse_chat_request(request)
     approval_mode = _validate_approval_mode(chat_request.approval_mode)
-    run_id = _new_run_id()
+    run_id = _coerce_reusable_run_id(chat_request.run_id) or _new_run_id()
+    if run_id in RUN_CANCEL_EVENTS:
+        raise HTTPException(status_code=409, detail="Run is already active")
     cancel_event = threading.Event()
     event_queue: Queue[dict[str, Any]] = Queue()
     RUN_CANCEL_EVENTS[run_id] = cancel_event
@@ -189,35 +195,6 @@ async def chat_stream(request: Request) -> StreamingResponse:
         live_events.append(event)
         del live_events[:-300]
         event_queue.put({"type": "trace", "run_id": run_id, "event": event})
-
-    def stream_events():
-        started = time.time()
-        yield _json_line({"type": "status", "message": "已接收任务，正在启动 agent", "elapsed": 0})
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                run_agent,
-                chat_request.message,
-                approval_mode,
-                chat_request.timeout_seconds,
-                uploaded_inputs,
-            )
-            tick = 0
-            while not future.done():
-                elapsed = round(time.time() - started, 1)
-                if tick == 0:
-                    upload_note = f"，已附加 {len(uploaded_inputs)} 个文件" if uploaded_inputs else ""
-                    message = f"agent 正在处理，请保持聊天页打开{upload_note}"
-                else:
-                    message = f"agent 仍在运行，已耗时 {elapsed:.1f}s"
-                yield _json_line({"type": "status", "message": message, "elapsed": elapsed})
-                tick += 1
-                time.sleep(1)
-            try:
-                result = future.result()
-            except Exception as exc:
-                yield _json_line({"type": "error", "message": str(exc)})
-                return
-        yield _json_line({"type": "result", "data": result.to_dict()})
 
     def stream_events():
         started = time.time()
@@ -459,6 +436,7 @@ async def _parse_chat_request(request: Request) -> tuple[ChatRequest, list[Uploa
             message=str(form.get("message") or ""),
             approval_mode=str(form.get("approval_mode") or "approve"),
             timeout_seconds=int(form.get("timeout_seconds") or 900),
+            run_id=str(form.get("run_id") or ""),
         )
         files = form.getlist("files")
         paths = [str(item) for item in form.getlist("paths")]
@@ -499,6 +477,20 @@ def _validate_approval_mode(value: str) -> str:
     if approval_mode == "prompt":
         raise HTTPException(status_code=400, detail="Web requests cannot use prompt approval mode")
     return approval_mode
+
+
+def _coerce_reusable_run_id(value: str) -> str:
+    run_id = (value or "").strip()
+    if not run_id:
+        return ""
+    if not re.fullmatch(r"[0-9]{8}_[0-9]{6}_[0-9a-fA-F]{8}", run_id):
+        raise HTTPException(status_code=400, detail="Invalid run id")
+    run_root = (WORKSPACE_ROOT / run_id).resolve()
+    try:
+        run_root.relative_to(WORKSPACE_ROOT.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid run id") from exc
+    return run_id
 
 
 def _json_line(payload: dict[str, Any]) -> str:

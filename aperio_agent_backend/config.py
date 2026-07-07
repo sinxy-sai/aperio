@@ -226,7 +226,7 @@ def get_install_project_deps() -> bool:
 
 
 def get_scan_sandbox_mode() -> str:
-    value = os.environ.get("APERIO_SCAN_SANDBOX", "host").strip().lower()
+    value = os.environ.get("APERIO_SCAN_SANDBOX", "auto").strip().lower()
     return value if value in {"host", "docker", "auto"} else "host"
 
 

@@ -935,7 +935,13 @@ def _write_performance(run_root: Path, started: float, route: str, ok: bool, err
 
 def _artifact_validation(run_root: Path, route: str) -> dict[str, Any]:
     expected_by_route = {
-        "code_health": ["outputs/code_health/code_health_report.md"],
+        "code_health": [
+            "outputs/code_health/code_health_report.md",
+            "outputs/code_health/drafts/architect.md",
+            "outputs/code_health/drafts/security.md",
+            "outputs/code_health/drafts/dependencies.md",
+            "outputs/code_health/drafts/documentation.md",
+        ],
         "prd": ["outputs/prd_review/prd_v2_final.md", "outputs/prd_review/review_matrix.md"],
         "general": ["answer.md"],
     }
