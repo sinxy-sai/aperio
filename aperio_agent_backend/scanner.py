@@ -173,26 +173,59 @@ def _compact_discovery(discovery: dict[str, Any]) -> dict[str, Any]:
 def _compact_findings(findings: Any) -> list[dict[str, Any]]:
     if not isinstance(findings, list):
         return []
+    selected = _select_compact_findings(findings)
     compact = []
-    for item in findings[:MAX_COMPACT_ITEMS * 2]:
+    for item in selected:
         if not isinstance(item, dict):
             continue
-        compact.append(
-            {
-                "id": item.get("id"),
-                "source_tool": item.get("source_tool"),
-                "rule_id": item.get("rule_id"),
-                "category": item.get("category"),
-                "severity": item.get("severity"),
-                "location": item.get("location"),
-                "scope": item.get("scope"),
-                "in_target": item.get("in_target"),
-                "message": _trim_text(item.get("message"), 400),
-                "recommendation": _trim_text(item.get("recommendation"), 400),
-                "confidence": item.get("confidence"),
-            }
-        )
+        compact.append(_compact_finding(item))
     return compact
+
+
+def _select_compact_findings(findings: list[Any]) -> list[dict[str, Any]]:
+    """Keep important findings even when noisy lint output is first in raw order."""
+    budget = MAX_COMPACT_ITEMS * 2
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        key = str(item.get("id") or (item.get("source_tool"), item.get("rule_id"), item.get("location"), item.get("message")))
+        if key in seen:
+            return
+        seen.add(key)
+        selected.append(item)
+
+    for item in findings:
+        if isinstance(item, dict) and item.get("in_target"):
+            add(item)
+    for severity in ("Critical", "High", "Medium"):
+        for item in findings:
+            if isinstance(item, dict) and item.get("severity") == severity:
+                add(item)
+    for item in findings:
+        if len(selected) >= budget:
+            break
+        add(item)
+
+    return selected
+
+
+def _compact_finding(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "source_tool": item.get("source_tool"),
+        "rule_id": item.get("rule_id"),
+        "category": item.get("category"),
+        "severity": item.get("severity"),
+        "location": item.get("location"),
+        "scope": item.get("scope"),
+        "in_target": item.get("in_target"),
+        "message": _trim_text(item.get("message"), 400),
+        "recommendation": _trim_text(item.get("recommendation"), 400),
+        "confidence": item.get("confidence"),
+    }
 
 
 def _compact_tool(name: str, data: dict[str, Any]) -> dict[str, Any]:

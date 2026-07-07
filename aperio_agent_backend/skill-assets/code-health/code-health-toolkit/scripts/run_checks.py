@@ -24,6 +24,12 @@ DEPENDENCY_NAMES = {
     "Pipfile.lock",
 }
 
+REQUIREMENTS_FILE_NAMES = {
+    "requirements.txt",
+    "requirements-dev.txt",
+    "dev-requirements.txt",
+}
+
 EXCLUDED_DIR_NAMES = {
     ".agents",
     ".codex",
@@ -281,6 +287,8 @@ def finding_scope(location: str, target_rel: str) -> tuple[str, bool]:
 
     if not path or path == "unknown":
         return "unknown", False
+    if target in {"", "."}:
+        return "target", True
     if target and (path == target or path.startswith(f"{target}/")):
         return "target", True
     if path == "tests" or path.startswith(("tests/", "test/", "__tests__/")):
@@ -602,6 +610,33 @@ def findings_summary(findings: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def rel_project_file(path: str, project_root: Path) -> str:
+    return relative_path(path, str(project_root))
+
+
+def requirement_files_for_cli(dependency_files: list[str], project_root: Path) -> list[str]:
+    requirements: list[str] = []
+    for path in dependency_files:
+        name = Path(path).name
+        if name in REQUIREMENTS_FILE_NAMES:
+            requirements.append(rel_project_file(path, project_root))
+    return sorted(set(requirements))
+
+
+def pip_audit_command(requirement_files: list[str]) -> str:
+    if requirement_files:
+        requirements_args = " ".join(f"-r {shlex.quote(path)}" for path in requirement_files)
+        return f"pip-audit {requirements_args} --format json --progress-spinner off"
+    return "pip-audit . --format json --progress-spinner off"
+
+
+def deptry_command(requirement_files: list[str]) -> str:
+    command = "deptry . --json-output .deptry.json --extend-exclude node_modules --extend-exclude dist --extend-exclude build"
+    if requirement_files:
+        command += f" --requirements-files {shlex.quote(','.join(requirement_files))}"
+    return command
+
+
 def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> dict[str, Any]:
     project_root = project_root.resolve()
     if not target.is_absolute():
@@ -610,6 +645,7 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
     target_rel = relative_path(str(target), str(project_root))
     discovery = discover_project_files(project_root, target)
     dependency_files = discovery.get("dependency_files", [])
+    requirement_files = requirement_files_for_cli(dependency_files, project_root)
     test_files = discovery.get("test_files", [])
 
     if install_project_deps:
@@ -626,15 +662,23 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
         )
     project_deps_ready = dependency_install.get("exit_code") == 0
 
-    if not project_deps_ready:
+    audit_command = pip_audit_command(requirement_files)
+    if requirement_files:
+        pip_audit = run_command(audit_command, project_root, max_output=30000, timeout_seconds=90)
+        if not project_deps_ready:
+            pip_audit["note"] = (
+                "Audited discovered requirements file(s) without installing the project package; "
+                "runtime environment coverage may still be incomplete."
+            )
+    elif not project_deps_ready:
         pip_audit = skipped_command(
-            "pip-audit . --format json --progress-spinner off",
+            audit_command,
             "project dependencies are not installed; skipped to avoid slow or incomplete dependency audit",
         )
     elif dependency_files:
-        pip_audit = run_command("pip-audit . --format json --progress-spinner off", project_root, max_output=30000, timeout_seconds=90)
+        pip_audit = run_command(audit_command, project_root, max_output=30000, timeout_seconds=90)
     else:
-        pip_audit = skipped_command("pip-audit . --format json --progress-spinner off", "no dependency manifest found under the project root")
+        pip_audit = skipped_command(audit_command, "no dependency manifest found under the project root")
 
     if not project_deps_ready:
         pytest_result = skipped_command(
@@ -671,7 +715,7 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
         pytest_result = skipped_command("python -m pytest --maxfail=20 --disable-warnings -q", "no pytest test files discovered under the project root")
         coverage_result = skipped_command("python -m coverage run -m pytest --maxfail=20 --disable-warnings -q", "no pytest test files discovered under the project root")
 
-    deptry_result = run_command("deptry . --json-output .deptry.json --extend-exclude node_modules --extend-exclude dist --extend-exclude build", project_root, max_output=30000, timeout_seconds=90)
+    deptry_result = run_command(deptry_command(requirement_files), project_root, max_output=30000, timeout_seconds=90)
     if deptry_result.get("available"):
         deptry_result["json_file"] = read_json_file(project_root / ".deptry.json")
 
