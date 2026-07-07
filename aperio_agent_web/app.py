@@ -38,6 +38,7 @@ MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_SINGLE_UPLOAD_BYTES = 25 * 1024 * 1024
 RUN_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 RUN_CANCEL_EVENTS: dict[str, threading.Event] = {}
+RUN_LIVE_EVENTS: dict[str, list[dict[str, Any]]] = {}
 
 
 class ChatRequest(BaseModel):
@@ -103,8 +104,12 @@ async def chat_stream(request: Request) -> StreamingResponse:
     cancel_event = threading.Event()
     event_queue: Queue[dict[str, Any]] = Queue()
     RUN_CANCEL_EVENTS[run_id] = cancel_event
+    RUN_LIVE_EVENTS[run_id] = []
 
     def emit_trace(event: dict[str, Any]) -> None:
+        live_events = RUN_LIVE_EVENTS.setdefault(run_id, [])
+        live_events.append(event)
+        del live_events[:-300]
         event_queue.put({"type": "trace", "run_id": run_id, "event": event})
 
     def stream_events():
@@ -268,10 +273,15 @@ def run_detail(run_id: str) -> dict[str, Any]:
     run_root = _safe_run_root(run_id)
     performance = _read_json(run_root / "performance.json")
     observability = _read_json(run_root / "observability.json")
+    live_events = RUN_LIVE_EVENTS.get(run_id, [])
+    if live_events and not observability.get("events"):
+        observability = {**observability, "events": live_events}
     return {
         "runId": run_id,
+        "running": run_id in RUN_CANCEL_EVENTS,
         "performance": performance,
         "observability": observability,
+        "answer": _read_text(run_root / "answer.md"),
         "artifacts": [item.__dict__ for item in read_artifacts(run_root)],
         "files": _list_run_files(run_root),
     }
@@ -291,6 +301,7 @@ def delete_run(run_id: str) -> dict[str, Any]:
     cancel_event = RUN_CANCEL_EVENTS.get(run_id)
     if cancel_event is not None:
         cancel_event.set()
+    RUN_LIVE_EVENTS.pop(run_id, None)
     run_root = _safe_run_root(run_id)
     shutil.rmtree(run_root)
     return {"ok": True, "runId": run_id}
@@ -314,6 +325,7 @@ def _new_run_id() -> str:
 def _finish_run(run_id: str, cancel_event: threading.Event, completed: Any) -> None:
     RUN_CANCEL_EVENTS.pop(run_id, None)
     if cancel_event.is_set():
+        RUN_LIVE_EVENTS.pop(run_id, None)
         run_root = (WORKSPACE_ROOT / run_id).resolve()
         try:
             run_root.relative_to(WORKSPACE_ROOT.resolve())
@@ -348,6 +360,12 @@ def _read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"error": "invalid JSON"}
+
+
+def _read_text(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace").strip()
 
 
 async def _parse_chat_request(request: Request) -> tuple[ChatRequest, list[UploadedInput]]:

@@ -140,13 +140,141 @@ def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
 
 
 def _usage_metadata(response: Any | None) -> dict[str, int]:
-    usage = getattr(response, "usage_metadata", None)
-    if not isinstance(usage, dict):
-        content = getattr(response, "content", None)
-        usage = getattr(content, "usage_metadata", None)
-    if not isinstance(usage, dict):
+    usage = _find_usage_metadata(response)
+    if not usage:
         return {}
+    input_tokens = _safe_int(
+        usage.get("input_tokens")
+        or usage.get("input_token_count")
+        or usage.get("prompt_tokens")
+        or usage.get("prompt_token_count")
+        or 0
+    )
+    output_tokens = _safe_int(
+        usage.get("output_tokens")
+        or usage.get("output_token_count")
+        or usage.get("completion_tokens")
+        or usage.get("candidates_token_count")
+        or 0
+    )
+    total_tokens = _safe_int(usage.get("total_tokens") or usage.get("total_token_count") or 0)
+    if total_tokens and not output_tokens:
+        output_tokens = max(0, total_tokens - input_tokens)
     return {
-        "input_tokens": int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0),
-        "output_tokens": int(usage.get("output_tokens") or usage.get("completion_tokens") or 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
     }
+
+
+def _find_usage_metadata(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> dict[str, Any]:
+    if value is None or depth > 8:
+        return {}
+    seen = seen or set()
+    value_id = id(value)
+    if value_id in seen:
+        return {}
+    seen.add(value_id)
+
+    if isinstance(value, dict):
+        direct = _normalize_usage_dict(value)
+        if direct:
+            return direct
+        for key in ("usage_metadata", "token_usage", "usage", "response_metadata", "llm_output"):
+            nested = value.get(key)
+            result = _find_usage_metadata(nested, depth=depth + 1, seen=seen)
+            if result:
+                return result
+        for key in ("message", "messages", "generations", "result", "content", "output"):
+            result = _find_usage_metadata(value.get(key), depth=depth + 1, seen=seen)
+            if result:
+                return result
+        return {}
+
+    direct = _normalize_usage_dict(value)
+    if direct:
+        return direct
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            result = _find_usage_metadata(item, depth=depth + 1, seen=seen)
+            if result:
+                return result
+    for attr in (
+        "usage_metadata",
+        "token_usage",
+        "usage",
+        "response_metadata",
+        "llm_output",
+        "result",
+        "message",
+        "messages",
+        "generations",
+        "content",
+        "output",
+    ):
+        if not hasattr(value, attr):
+            continue
+        result = _find_usage_metadata(getattr(value, attr), depth=depth + 1, seen=seen)
+        if result:
+            return result
+    return {}
+
+
+def _normalize_usage_dict(value: Any) -> dict[str, Any]:
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return {}
+    if hasattr(value, "model_dump"):
+        try:
+            value = value.model_dump()
+        except Exception:
+            pass
+    elif not isinstance(value, dict) and hasattr(value, "dict"):
+        try:
+            value = value.dict()
+        except Exception:
+            pass
+    if not isinstance(value, dict):
+        usage_keys = (
+            "input_tokens",
+            "output_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_token_count",
+            "output_token_count",
+            "prompt_token_count",
+            "candidates_token_count",
+            "total_token_count",
+        )
+        extracted = {key: getattr(value, key) for key in usage_keys if hasattr(value, key)}
+        return {key: val for key, val in extracted.items() if val is not None}
+    if any(
+        key in value
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_token_count",
+            "output_token_count",
+            "prompt_token_count",
+            "candidates_token_count",
+            "total_token_count",
+        )
+    ):
+        return value
+    for key in ("token_usage", "usage", "usage_metadata"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            normalized = _normalize_usage_dict(nested)
+            if normalized:
+                return normalized
+    return {}
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

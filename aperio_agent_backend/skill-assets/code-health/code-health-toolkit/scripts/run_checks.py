@@ -24,6 +24,47 @@ DEPENDENCY_NAMES = {
     "Pipfile.lock",
 }
 
+EXCLUDED_DIR_NAMES = {
+    ".agents",
+    ".codex",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "agent-chat-ui-main",
+    "build",
+    "demo",
+    "dist",
+    "docs",
+    "full-stack-fastapi-template-master",
+    "hatch_pet_runs",
+    "htmlcov",
+    "node_modules",
+    "playwright-report",
+    "workspace",
+}
+
+EXCLUDED_SCAN_PATTERN = (
+    r"(^|/)(\.agents|\.codex|\.git|\.mypy_cache|\.pytest_cache|\.ruff_cache|\.venv|__pycache__|"
+    r"agent-chat-ui-main|build|demo|dist|docs|full-stack-fastapi-template-master|hatch_pet_runs|"
+    r"htmlcov|node_modules|playwright-report|workspace)/|"
+    r"(^|/)(\.coverage\.json|\.deptry\.json|\.secrets\.baseline)$"
+)
+
+
+def iter_project_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    if not root.exists():
+        return files
+    for path in sorted(root.rglob("*")):
+        if any(part in EXCLUDED_DIR_NAMES for part in path.parts):
+            continue
+        if path.is_file():
+            files.append(path)
+    return files
+
 
 def relative_path(path: str, root: str) -> str:
     path_obj = Path(path).resolve()
@@ -149,28 +190,30 @@ def discover_project_files(project_root: Path, target: Path) -> dict[str, Any]:
         "readme_files": [],
     }
     if target.exists():
-        result["python_files"] = [str(path) for path in sorted(target.rglob("*.py"))]
+        result["python_files"] = [str(path) for path in iter_project_files(target) if path.suffix == ".py"]
     if project_root.exists():
+        project_files = iter_project_files(project_root)
         result["test_files"] = [
             str(path)
-            for path in sorted(project_root.rglob("*.py"))
+            for path in project_files
             if path.name.startswith("test_") or path.name.endswith("_test.py")
         ]
         result["test_support_files"] = [
             str(path)
-            for path in sorted(project_root.rglob("*.py"))
+            for path in project_files
+            if path.suffix == ".py"
             if any(part in test_names for part in path.parts)
             and not (path.name.startswith("test_") or path.name.endswith("_test.py"))
         ]
         result["dependency_files"] = [
             str(path)
-            for path in sorted(project_root.rglob("*"))
-            if path.is_file() and path.name in DEPENDENCY_NAMES
+            for path in project_files
+            if path.name in DEPENDENCY_NAMES
         ]
         result["readme_files"] = [
             str(path)
-            for path in sorted(project_root.rglob("*"))
-            if path.is_file() and path.name.lower().startswith("readme")
+            for path in project_files
+            if path.name.lower().startswith("readme")
         ]
     return result
 
@@ -623,7 +666,7 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
         pytest_result = skipped_command("python -m pytest --maxfail=20 --disable-warnings -q", "no pytest test files discovered under the project root")
         coverage_result = skipped_command("python -m coverage run -m pytest --maxfail=20 --disable-warnings -q", "no pytest test files discovered under the project root")
 
-    deptry_result = run_command("deptry . --json-output .deptry.json", project_root, max_output=30000, timeout_seconds=90)
+    deptry_result = run_command("deptry . --json-output .deptry.json --extend-exclude node_modules --extend-exclude dist --extend-exclude build", project_root, max_output=30000, timeout_seconds=90)
     if deptry_result.get("available"):
         deptry_result["json_file"] = read_json_file(project_root / ".deptry.json")
 
@@ -642,12 +685,13 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
         radon_result = radon_cc
 
     tools = {
-        "ruff": run_command(f"ruff check {shlex.quote(target_rel)} --output-format json --no-cache", project_root),
+        "ruff": run_command(f"ruff check {shlex.quote(target_rel)} --output-format json --no-cache", project_root, timeout_seconds=60),
         "mypy": run_command(
             f"mypy {shlex.quote(target_rel)} --hide-error-context --no-error-summary --no-incremental --ignore-missing-imports",
             project_root,
+            timeout_seconds=90,
         ),
-        "bandit": run_command(f"bandit -r {shlex.quote(target_rel)} -f json -q", project_root, max_output=30000),
+        "bandit": run_command(f"bandit -r {shlex.quote(target_rel)} -f json -q", project_root, max_output=30000, timeout_seconds=60),
         "pip_audit": pip_audit,
         "pytest": pytest_result,
         "coverage": coverage_result,
@@ -656,7 +700,7 @@ def run_checks(project_root: Path, target: Path, install_project_deps: bool) -> 
         "radon": radon_result,
         "detect_secrets": run_command(
             "detect-secrets scan --all-files --exclude-files "
-            + shlex.quote(r"(^|/)(\.mypy_cache|\.pytest_cache|\.ruff_cache|__pycache__)/|(^|/)(\.coverage\.json|\.deptry\.json|\.secrets\.baseline)$")
+            + shlex.quote(EXCLUDED_SCAN_PATTERN)
             + " .",
             project_root,
             max_output=50000,

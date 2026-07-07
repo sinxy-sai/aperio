@@ -25,6 +25,7 @@ from .scanner import compact_scan_summary, run_code_health_scan
 
 
 KNOWN_ARTIFACTS = (
+    "answer.md",
     "outputs/code_health/code_health_report.md",
     "outputs/prd_review/prd_v2_final.md",
     "outputs/prd_review/review_matrix.md",
@@ -126,6 +127,7 @@ def run_agent(
             _write_input_files_for_run(run_root, message, input_bundle)
             _emit_event(event_callback, {"type": "phase", "phase": "input_written", "message": "写入标准输入包"})
             answer = _binary_upload_limitation_answer(message, uploaded_metadata)
+            _write_answer(run_root, answer)
             _write_performance(run_root, started, route, ok=True)
             _emit_event(event_callback, {"type": "phase", "phase": "run_completed", "message": "运行完成"})
             return AgentRunResult(
@@ -173,7 +175,11 @@ def run_agent(
             else:
                 answer = _run_general(message)
 
+        if route == "code_health":
+            answer = _finalize_code_health_answer(run_root, answer)
+
         _raise_if_cancelled(cancel_event)
+        _write_answer(run_root, answer)
         _write_performance(run_root, started, route, ok=True)
         artifacts = _read_artifacts(run_root)
         for artifact in artifacts:
@@ -220,6 +226,7 @@ def run_agent(
             )
         message_text = f"后端 agent 运行失败：{exc}"
         _write_text(run_root / "error.txt", message_text)
+        _write_answer(run_root, message_text)
         _write_performance(run_root, started, "error", ok=False, error=str(exc))
         return AgentRunResult(
             ok=False,
@@ -603,6 +610,119 @@ def _run_code_health_lite(message: str, run_root: Path, scan_summary: dict[str, 
     return "代码健康报告已完成，产物为 `outputs/code_health/code_health_report.md`。"
 
 
+def _finalize_code_health_answer(run_root: Path, agent_answer: str) -> str:
+    report_path = run_root / "outputs" / "code_health" / "code_health_report.md"
+    if not report_path.exists() or report_path.stat().st_size < 80:
+        _write_code_health_fallback_report(run_root, agent_answer)
+    if report_path.exists():
+        report = report_path.read_text(encoding="utf-8", errors="replace").strip()
+        if report:
+            suffix = "\n\n---\n完整 Markdown 文件：`outputs/code_health/code_health_report.md`"
+            return _trim_answer(report, 18000) + suffix
+    return agent_answer or "代码健康检查已完成，但没有生成可读报告。请查看 `outputs/code_health/raw/tool_results.json`。"
+
+
+def _write_code_health_fallback_report(run_root: Path, agent_answer: str) -> None:
+    code_health_dir = run_root / "outputs" / "code_health"
+    raw = _read_json_file(code_health_dir / "raw" / "tool_results.json")
+    drafts = {
+        "架构与可维护性": code_health_dir / "drafts" / "architect.md",
+        "安全风险": code_health_dir / "drafts" / "security.md",
+        "依赖与供应链": code_health_dir / "drafts" / "dependencies.md",
+        "文档与测试": code_health_dir / "drafts" / "documentation.md",
+    }
+    sections = [
+        "# 代码健康检查报告",
+        "",
+        "> 后端检测到 DeepAgents 未写出最终报告，已根据确定性扫描结果和 reviewer 草稿生成兜底报告。",
+        "",
+        "## 1. 总体结论",
+        "",
+        _fallback_overview(raw, agent_answer),
+        "",
+        "## 2. 扫描范围与工具覆盖",
+        "",
+        _fallback_tool_coverage(raw),
+        "",
+        "## 3. 发现统计",
+        "",
+        _fallback_findings_summary(raw),
+    ]
+    for title, path in drafts.items():
+        content = path.read_text(encoding="utf-8", errors="replace").strip() if path.exists() else ""
+        sections.extend(["", f"## {title}", "", content or "未生成该 reviewer 草稿。"])
+    sections.extend(
+        [
+            "",
+            "## 后续建议",
+            "",
+            "1. 先处理确定性工具或 reviewer 草稿中能定位到文件路径的问题。",
+            "2. 对工具显示 skipped、unavailable 或 timed_out 的部分，补齐依赖后重新运行体检。",
+            "3. 若再次出现未生成最终报告，应检查观测页中的 GraphInterrupt 或最终写文件审批配置。",
+        ]
+    )
+    _write_text(code_health_dir / "code_health_report.md", "\n".join(sections))
+
+
+def _fallback_overview(raw: dict[str, Any], agent_answer: str) -> str:
+    summary = raw.get("findings_summary") if isinstance(raw, dict) else {}
+    total = summary.get("total") if isinstance(summary, dict) else None
+    target = raw.get("target_rel") or raw.get("target") or "unknown"
+    if total is not None:
+        return f"本次扫描目标为 `{target}`，确定性扫描归一化发现数为 **{total}**。最终报告由后端兜底生成，需结合下方草稿复核。"
+    if agent_answer:
+        return f"DeepAgents 返回：{agent_answer}"
+    return f"本次扫描目标为 `{target}`。未能从工具结果中读取发现统计。"
+
+
+def _fallback_tool_coverage(raw: dict[str, Any]) -> str:
+    coverage = raw.get("tool_coverage") if isinstance(raw, dict) else {}
+    if not isinstance(coverage, dict) or not coverage:
+        return "未记录工具覆盖信息。"
+    lines = ["| 工具 | 状态 | 说明 |", "| --- | --- | --- |"]
+    for name, info in sorted(coverage.items()):
+        if isinstance(info, dict):
+            status = info.get("status") or ("available" if info.get("available") else "unknown")
+            reason = info.get("reason") or info.get("note") or ""
+        else:
+            status = str(info)
+            reason = ""
+        lines.append(f"| `{name}` | {status} | {str(reason).replace('|', '/')} |")
+    return "\n".join(lines)
+
+
+def _fallback_findings_summary(raw: dict[str, Any]) -> str:
+    summary = raw.get("findings_summary") if isinstance(raw, dict) else {}
+    if not isinstance(summary, dict) or not summary:
+        return "未记录发现统计。"
+    lines = []
+    for key in ("total", "target_total", "project_context_total"):
+        if key in summary:
+            lines.append(f"- `{key}`: {summary[key]}")
+    for key in ("by_severity", "by_category", "by_tool", "by_scope"):
+        value = summary.get(key)
+        if isinstance(value, dict) and value:
+            parts = ", ".join(f"{name}={count}" for name, count in sorted(value.items()))
+            lines.append(f"- `{key}`: {parts}")
+    return "\n".join(lines) or "未记录发现统计。"
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _trim_answer(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 80].rstrip() + "\n\n[内容较长，聊天框已截断；完整内容请下载 Markdown 产物。]"
+
+
 def _read_artifacts(run_root: Path) -> list[AgentArtifact]:
     artifacts: list[AgentArtifact] = []
     seen: set[str] = set()
@@ -621,6 +741,10 @@ def _read_artifacts(run_root: Path) -> list[AgentArtifact]:
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content.strip() + "\n", encoding="utf-8")
+
+
+def _write_answer(run_root: Path, answer: str) -> None:
+    _write_text(run_root / "answer.md", answer or "运行完成。")
 
 
 def _write_performance(run_root: Path, started: float, route: str, ok: bool, error: str = "") -> None:

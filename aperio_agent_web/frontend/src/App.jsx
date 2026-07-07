@@ -72,6 +72,16 @@ function loadSessions() {
   return [newSession()];
 }
 
+function readStoredSessions(fallback = []) {
+  try {
+    const value = JSON.parse(localStorage.getItem(SESSION_STORE_KEY) || "[]");
+    if (Array.isArray(value) && value.length) return value;
+  } catch {
+    // Ignore corrupted local state and use the in-memory fallback.
+  }
+  return fallback;
+}
+
 function saveSessions(sessions, activeId) {
   const ordered = [...sessions]
     .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
@@ -150,33 +160,107 @@ function ChatPage({ navigate }) {
   }, [activeSession, sessions]);
 
   useEffect(() => {
+    const sessionDraft = activeSession?.draftAssistant || "";
+    setDraftAssistant(sessionDraft);
+    if (sessionDraft) setRunning(true);
+  }, [activeSession?.id, activeSession?.draftAssistant]);
+
+  useEffect(() => {
     fetch("/api/health")
       .then((response) => response.json())
       .then(setHealth)
       .catch((error) => setHealth({ ok: false, error: error.message }));
   }, []);
 
-  function updateSessions(updater) {
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    const runId = activeSession?.runId;
+    if (!sessionId || !runId || !activeSession?.draftAssistant) return undefined;
+
+    let cancelled = false;
+    const syncRun = async () => {
+      try {
+        const detail = await fetchJson(`/api/runs/${encodeURIComponent(runId)}`);
+        if (cancelled) return;
+        setArtifacts(detail.artifacts || []);
+        setSelectedRunId(detail.runId || runId);
+        const detailEvents = Array.isArray(detail.observability?.events)
+          ? detail.observability.events.map(normalizeTraceEvent)
+          : [];
+        if (detailEvents.length) setSessionTraceEvents(sessionId, detailEvents);
+        const perf = detail.performance || {};
+        const isComplete = Object.prototype.hasOwnProperty.call(perf, "ok") || Boolean(perf.error);
+        if (!isComplete) {
+          setRunning(true);
+          setRunMeta("agent 仍在运行，正在同步状态");
+          return;
+        }
+        const answer = detail.answer || runDetailFallbackAnswer(perf);
+        completeRunMessage(sessionId, runId, answer);
+        setRunMeta(`完成 · ${Number(perf.duration_seconds || 0).toFixed(1)}s`);
+      } catch (error) {
+        if (!cancelled) setRunMeta(`同步运行状态失败：${error.message}`);
+      }
+    };
+
+    void syncRun();
+    const timer = window.setInterval(syncRun, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeSession?.id, activeSession?.runId, activeSession?.draftAssistant]);
+
+  function updateSessions(updater, saveActiveId = activeId) {
     setSessions((current) => {
       const next = updater(current);
-      saveSessions(next, activeId || next[0]?.id || "");
+      saveSessions(next, saveActiveId || next[0]?.id || "");
       return next;
     });
   }
 
-  function patchActiveSession(patch) {
-    updateSessions((current) =>
-      current.map((session) =>
-        session.id === activeSession.id
-          ? { ...session, ...patch, updatedAt: Date.now() }
-          : session,
-      ),
-    );
+  function updateSessionById(sessionId, updater, options = {}) {
+    if (!sessionId) return;
+    const applyUpdate = (current) =>
+      current.map((session) => {
+        if (session.id !== sessionId) return session;
+        return { ...session, ...updater(session), updatedAt: Date.now() };
+      });
+    const saveActiveId = localStorage.getItem(ACTIVE_SESSION_KEY) || activeId || sessionId;
+
+    if (options.persistNow) {
+      const persistedNext = saveSessions(applyUpdate(readStoredSessions(sessions)), saveActiveId);
+      setSessions(persistedNext);
+      return;
+    }
+    updateSessions(applyUpdate, saveActiveId);
   }
 
-  function addMessage(role, text) {
-    const targetId = activeSession?.id;
+  function patchSessionById(sessionId, patch, options) {
+    updateSessionById(sessionId, () => patch, options);
+  }
+
+  function patchActiveSession(patch) {
+    if (!activeSession?.id) return;
+    patchSessionById(activeSession.id, patch);
+  }
+
+  function addMessage(role, text, sessionId = activeSession?.id) {
+    const targetId = sessionId;
     if (!targetId) return;
+    const persistedMessage = { id: makeMessageId(), role, text };
+    saveSessions(
+      readStoredSessions(sessions).map((session) =>
+        session.id === targetId
+          ? {
+              ...session,
+              messages: [...(session.messages || []), persistedMessage],
+              updatedAt: Date.now(),
+            }
+          : session,
+      ),
+      localStorage.getItem(ACTIVE_SESSION_KEY) || activeId || targetId,
+    );
     updateSessions((current) =>
       current.map((session) => {
         if (session.id !== targetId) return session;
@@ -188,6 +272,42 @@ function ChatPage({ navigate }) {
         return { ...session, messages: nextMessages, title, updatedAt: Date.now() };
       }),
     );
+  }
+
+  function completeRunMessage(sessionId, runId, answer) {
+    if (!sessionId || !runId) return;
+    const message = { id: makeMessageId(), role: "assistant", text: answer || "运行完成。" };
+    updateSessionById(
+      sessionId,
+      (session) => {
+        const completed = new Set(session.completedRunIds || []);
+        const messages = session.messages || [];
+        const shouldAppend = !completed.has(runId);
+        completed.add(runId);
+        return {
+          runId,
+          draftAssistant: "",
+          completedRunIds: Array.from(completed).slice(-80),
+          messages: shouldAppend ? [...messages, message] : messages,
+        };
+      },
+      { persistNow: true },
+    );
+    if (sessionId === activeSession?.id) {
+      setDraftAssistant("");
+      setRunning(false);
+    }
+  }
+
+  function setSessionDraft(sessionId, text) {
+    patchSessionById(sessionId, { draftAssistant: text }, { persistNow: true });
+    if (sessionId === activeSession?.id) setDraftAssistant(text);
+  }
+
+  function setSessionTraceEvents(sessionId, events) {
+    const nextEvents = (events || []).map(normalizeTraceEvent).slice(-120);
+    patchSessionById(sessionId, { traceEvents: nextEvents }, { persistNow: true });
+    if (sessionId === activeSession?.id) setTraceEvents(nextEvents);
   }
 
   function editMessage(message) {
@@ -220,8 +340,8 @@ function ChatPage({ navigate }) {
     setActiveId(id);
     setSelectedRunId(session.runId || "");
     setArtifacts([]);
-    setTraceEvents([]);
-    setDraftAssistant("");
+    setTraceEvents(session.traceEvents || []);
+    setDraftAssistant(session.draftAssistant || "");
     saveSessions(sessions, id);
     navigate(`/?session=${encodeURIComponent(id)}`);
   }
@@ -240,6 +360,7 @@ function ChatPage({ navigate }) {
   }
 
   function clearChat() {
+    patchActiveSession({ draftAssistant: "", traceEvents: [] });
     patchActiveSession({ title: "新对话", messages: [], runId: "" });
     setArtifacts([]);
     setTraceEvents([]);
@@ -303,8 +424,12 @@ function ChatPage({ navigate }) {
     setRunMeta("正在刷新产物");
     const detail = await fetchJson(`/api/runs/${encodeURIComponent(runId)}`);
     setArtifacts(detail.artifacts || []);
+    setTraceEvents(Array.isArray(detail.observability?.events) ? detail.observability.events.map(normalizeTraceEvent) : []);
     setSelectedRunId(detail.runId);
-    patchActiveSession({ runId: detail.runId });
+    patchActiveSession({
+      runId: detail.runId,
+      traceEvents: Array.isArray(detail.observability?.events) ? detail.observability.events.map(normalizeTraceEvent).slice(-120) : [],
+    });
     setRunMeta("产物已刷新");
   }
 
@@ -348,34 +473,40 @@ function ChatPage({ navigate }) {
 
   function stopRunningRun() {
     const stream = streamRef.current;
+    const targetSessionId = stream?.sessionId || activeSession?.id;
+    const targetRunId = stream?.runId || activeSession?.runId;
     if (stream) {
       stream.stopped = true;
-      if (stream.runId) {
-        void fetch(`/api/runs/${encodeURIComponent(stream.runId)}/cancel`, { method: "POST" }).catch(() => {});
-      }
       stream.controller.abort();
       streamRef.current = null;
     }
+    if (targetRunId) {
+      void fetch(`/api/runs/${encodeURIComponent(targetRunId)}/cancel`, { method: "POST" }).catch(() => {});
+    }
     setRunning(false);
-    setDraftAssistant("");
+    if (targetSessionId) setSessionDraft(targetSessionId, "");
+    else setDraftAssistant("");
     setRunMeta("已停止，可重新提问");
-    addMessage("assistant", "已停止本次运行。");
+    addMessage("assistant", "已停止本次运行。", targetSessionId);
   }
 
   async function submitTask(event) {
     event.preventDefault();
     const pendingAttachments = attachments;
     const message = input.trim() || (pendingAttachments.length ? "请分析我上传的文件。" : "");
-    if (!message || running) return;
+    const targetSessionId = activeSession?.id;
+    if (!message || running || !targetSessionId) return;
 
-    addMessage("user", formatUserMessage(message, pendingAttachments));
+    addMessage("user", formatUserMessage(message, pendingAttachments), targetSessionId);
     setInput("");
     setAttachments([]);
     setRunning(true);
+    setSessionDraft(targetSessionId, "正在连接后端...");
     setDraftAssistant("正在连接后端...");
     setRunMeta("agent 正在处理");
     setTraceEvents([]);
-    const stream = { controller: new AbortController(), runId: "", stopped: false };
+    patchSessionById(targetSessionId, { traceEvents: [] }, { persistNow: true });
+    const stream = { controller: new AbortController(), runId: "", stopped: false, sessionId: targetSessionId };
     streamRef.current = stream;
 
     try {
@@ -391,19 +522,28 @@ function ChatPage({ navigate }) {
         if (eventRunId) {
           stream.runId = eventRunId;
           setSelectedRunId(eventRunId);
-          patchActiveSession({ runId: eventRunId });
+          patchSessionById(targetSessionId, { runId: eventRunId }, { persistNow: true });
         }
         if (eventData.type === "status") {
+          setSessionDraft(targetSessionId, eventData.message || "agent 正在运行");
           setDraftAssistant(eventData.message || "agent 正在运行");
           setRunMeta(`运行中 · ${Number(eventData.elapsed || 0).toFixed(1)}s`);
           return;
         }
         if (eventData.type === "trace") {
-          setTraceEvents((current) => [...current.slice(-79), normalizeTraceEvent(eventData.event)]);
+          const traceEvent = normalizeTraceEvent(eventData.event);
+          setSessionDraft(targetSessionId, formatLiveTrace(traceEvent));
+          setTraceEvents((current) => {
+            const nextEvents = [...current.slice(-119), traceEvent];
+            patchSessionById(targetSessionId, { traceEvents: nextEvents }, { persistNow: true });
+            return nextEvents;
+          });
+          setDraftAssistant(formatLiveTrace(traceEvent));
           return;
         }
         if (eventData.type === "cancelled") {
           stream.stopped = true;
+          setSessionDraft(targetSessionId, "");
           setDraftAssistant("");
           setRunMeta("已停止，可重新提问");
           return;
@@ -415,21 +555,22 @@ function ChatPage({ navigate }) {
 
         const result = eventData.data || {};
         const answer = result.answer || (result.ok ? "运行完成。" : "运行失败。");
-        setDraftAssistant("");
-        addMessage("assistant", answer);
+        completeRunMessage(targetSessionId, result.run_id || stream.runId || "", answer);
         setArtifacts(result.artifacts || []);
         setSelectedRunId(result.run_id || "");
-        patchActiveSession({ runId: result.run_id || "" });
+        patchSessionById(targetSessionId, { runId: result.run_id || "" }, { persistNow: true });
         setRunMeta(`完成 · ${Number(result.duration_seconds || 0).toFixed(1)}s · code ${result.return_code}`);
       });
     } catch (error) {
       if (stream.stopped || error.name === "AbortError") {
+        setSessionDraft(targetSessionId, "");
         setDraftAssistant("");
         setRunMeta("已停止，可重新提问");
         return;
       }
+      setSessionDraft(targetSessionId, "");
       setDraftAssistant("");
-      addMessage("assistant", `请求失败：${error.message}`);
+      addMessage("assistant", `请求失败：${error.message}`, targetSessionId);
       setRunMeta("运行失败");
     } finally {
       if (streamRef.current === stream) {
@@ -440,7 +581,9 @@ function ChatPage({ navigate }) {
   }
 
   const displayMessages = [...(activeSession?.messages || [])];
-  if (draftAssistant) displayMessages.push({ id: "draft-assistant", role: "assistant", text: draftAssistant, draft: true });
+  const sessionDraft = activeSession?.draftAssistant || draftAssistant;
+  if (sessionDraft) displayMessages.push({ id: "draft-assistant", role: "assistant", text: sessionDraft, draft: true });
+  const displayTraceEvents = traceEvents.length ? traceEvents : activeSession?.traceEvents || [];
 
   return (
     <main className={`shell ${railCollapsed ? "rail-collapsed" : ""} ${artifactsCollapsed ? "artifacts-collapsed" : ""}`}>
@@ -601,7 +744,7 @@ function ChatPage({ navigate }) {
         <div className="panel-tabs">
           <button className="panel-tab active" type="button">产物</button>
         </div>
-        <TraceList events={traceEvents} running={running} />
+        <TraceList events={displayTraceEvents} running={running} />
         <div className="artifact-list">
           {!artifacts.length ? (
             <div className="empty-state">完成一次任务后，这里会显示 Markdown 报告和性能文件。</div>
@@ -707,7 +850,7 @@ function ObservabilityPage({ navigate }) {
                 <span>{formatSeconds(run.durationSeconds)}</span>
               </div>
               <strong>{run.runId}</strong>
-              <span>{formatNumber(run.modelCalls)} model · {formatNumber(run.toolCalls)} tool · {formatNumber(run.totalTokens)} tok</span>
+              <span>{formatNumber(run.modelCalls)} model · {formatNumber(run.toolCalls)} tool · {formatTokenCount(run.totalTokens, run.modelCalls)} tok</span>
             </button>
           ))}
         </div>
@@ -739,7 +882,7 @@ function ObservabilityPage({ navigate }) {
             <Metric label={`Error Rate · ${systemWindow}`} value={formatPercent(summary?.errorRate)} meta={`${formatNumber(summary?.failedRuns)} failed`} tone={Number(summary?.errorRate || 0) > 0 ? "error" : "ok"} />
             <Metric label={`P50 Latency · ${systemWindow}`} value={formatLatency(summary?.p50LatencySeconds)} meta={`avg ${formatLatency(summary?.avgLatencySeconds)}`} />
             <Metric label={`P99 Latency · ${systemWindow}`} value={formatLatency(summary?.p99LatencySeconds)} meta="tail latency" />
-            <Metric label={`Total Tokens · ${systemWindow}`} value={formatNumber(summary?.totalTokens)} meta={`${formatNumber(summary?.totalModelCalls)} model calls`} />
+            <Metric label={`Total Tokens · ${systemWindow}`} value={formatTokenCount(summary?.totalTokens, summary?.totalModelCalls)} meta={`${formatNumber(summary?.totalModelCalls)} model calls`} />
             <Metric label="Most Recent Run" value={summary?.latestRunId || "无"} meta={summary?.latestRunRoute || "not available"} />
           </section>
 
@@ -789,7 +932,7 @@ function ObservabilityPage({ navigate }) {
                     <span>{run.route || "unknown"}</span>
                     <span className={run.ok === false || run.route === "error" ? "status-error" : "status-ok"}>{run.ok === false || run.route === "error" ? "error" : "ok"}</span>
                     <span>{formatLatency(run.durationSeconds)}</span>
-                    <span>{formatNumber(run.totalTokens)}</span>
+                    <span>{formatTokenCount(run.totalTokens, run.modelCalls)}</span>
                   </button>
                 ))}
               </div>
@@ -1128,11 +1271,21 @@ function traceMeta(event) {
   if (event.tokens) {
     const input = Number(event.tokens.input_tokens || 0);
     const output = Number(event.tokens.output_tokens || 0);
-    parts.push(`${input}/${output} tok`);
+    const total = Number(event.tokens.total_tokens || input + output);
+    parts.push(input || output ? `${input}/${output} tok` : `${total} tok`);
   }
   if (event.path) parts.push(event.path);
   if (event.error) parts.push(`error: ${event.error}`);
   return parts.join(" · ") || event.phase || "trace";
+}
+
+function formatLiveTrace(event) {
+  const title = traceTitle(event);
+  const meta = traceMeta(event);
+  if (event.type === "model") return `模型调用中：${meta ? `${title} · ${meta}` : title}`;
+  if (event.type === "tool") return `工具执行中：${meta ? `${title} · ${meta}` : title}`;
+  if (event.type === "artifact") return `产物更新：${title}`;
+  return meta && meta !== title ? `${title} · ${meta}` : title;
 }
 
 function requestBody(message, approvalMode, timeoutSeconds, attachments, signal) {
@@ -1250,6 +1403,19 @@ async function readNdjson(body, onEvent) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function formatTokenCount(tokens, modelCalls = 0) {
+  const tokenCount = Number(tokens || 0);
+  if (tokenCount > 0) return formatNumber(tokenCount);
+  return Number(modelCalls || 0) > 0 ? "未采集" : "0";
+}
+
+function runDetailFallbackAnswer(performance) {
+  if (performance?.ok === false || performance?.error) {
+    return `运行失败：${performance.error || "请查看运行产物和事件时间线。"}`;
+  }
+  return "运行已完成。";
 }
 
 function formatBytes(value) {
