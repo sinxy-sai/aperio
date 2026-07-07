@@ -88,6 +88,7 @@ def run_agent(
     uploaded_inputs: list[UploadedInput] | None = None,
     run_id: str | None = None,
     cancel_event: Any | None = None,
+    event_callback: Any | None = None,
 ) -> AgentRunResult:
     started = time.time()
     run_id = run_id or time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
@@ -95,10 +96,22 @@ def run_agent(
     run_root.mkdir(parents=True, exist_ok=True)
 
     try:
+        _emit_event(event_callback, {"type": "phase", "phase": "run_started", "message": "创建运行目录", "run_id": run_id})
         _raise_if_cancelled(cancel_event)
         route = _route_task(message)
+        _emit_event(event_callback, {"type": "phase", "phase": "route_selected", "message": f"路由到 {route}", "route": route})
         code_project_path, code_target_rel, code_target_path, code_context_found = resolve_code_context(message)
         uploaded_metadata = _write_uploaded_inputs(run_root, uploaded_inputs or [])
+        if uploaded_metadata:
+            _emit_event(
+                event_callback,
+                {
+                    "type": "phase",
+                    "phase": "uploads_saved",
+                    "message": f"保存 {len(uploaded_metadata)} 个上传文件",
+                    "file_count": len(uploaded_metadata),
+                },
+            )
         _raise_if_cancelled(cancel_event)
         input_bundle = build_input_bundle(
             run_id=run_id,
@@ -111,8 +124,10 @@ def run_agent(
         )
         if _should_return_binary_upload_limitation(route, uploaded_metadata):
             _write_input_files_for_run(run_root, message, input_bundle)
+            _emit_event(event_callback, {"type": "phase", "phase": "input_written", "message": "写入标准输入包"})
             answer = _binary_upload_limitation_answer(message, uploaded_metadata)
             _write_performance(run_root, started, route, ok=True)
+            _emit_event(event_callback, {"type": "phase", "phase": "run_completed", "message": "运行完成"})
             return AgentRunResult(
                 ok=True,
                 return_code=0,
@@ -125,6 +140,7 @@ def run_agent(
 
         scan_summary: dict[str, Any] | None = None
         if route == "code_health":
+            _emit_event(event_callback, {"type": "phase", "phase": "code_scan_started", "message": "开始代码健康扫描"})
             scan_result = run_code_health_scan(
                 code_project_path,
                 code_target_rel,
@@ -134,9 +150,11 @@ def run_agent(
                 sandbox_mode=get_scan_sandbox_mode(),
             )
             scan_summary = compact_scan_summary(scan_result)
+            _emit_event(event_callback, {"type": "phase", "phase": "code_scan_completed", "message": "代码健康扫描完成"})
             _raise_if_cancelled(cancel_event)
 
         if get_engine_name() == "deepagents":
+            _emit_event(event_callback, {"type": "phase", "phase": "agent_started", "message": "启动 DeepAgents"})
             answer = run_deep_agent(
                 message,
                 run_root,
@@ -144,8 +162,10 @@ def run_agent(
                 code_scan_summary=scan_summary,
                 approval_mode=approval_mode,
                 cancel_event=cancel_event,
+                event_callback=event_callback,
             )
         else:
+            _emit_event(event_callback, {"type": "phase", "phase": "agent_started", "message": f"启动 {get_engine_name()} 引擎"})
             if route == "prd":
                 answer = _run_prd_review(message, run_root)
             elif route == "code_health":
@@ -155,13 +175,26 @@ def run_agent(
 
         _raise_if_cancelled(cancel_event)
         _write_performance(run_root, started, route, ok=True)
+        artifacts = _read_artifacts(run_root)
+        for artifact in artifacts:
+            _emit_event(
+                event_callback,
+                {
+                    "type": "artifact",
+                    "phase": "artifact_written",
+                    "message": f"生成产物 {artifact.path}",
+                    "path": artifact.path,
+                    "size": artifact.size,
+                },
+            )
+        _emit_event(event_callback, {"type": "phase", "phase": "run_completed", "message": "运行完成"})
         return AgentRunResult(
             ok=True,
             return_code=0,
             duration_seconds=round(time.time() - started, 1),
             answer=answer,
             run_id=run_id,
-            artifacts=_read_artifacts(run_root),
+            artifacts=artifacts,
             route=route,
         )
     except AgentRunCancelled:
@@ -207,6 +240,15 @@ class AgentRunCancelled(Exception):
 def _raise_if_cancelled(cancel_event: Any | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise AgentRunCancelled()
+
+
+def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
+    if event_callback is None:
+        return
+    try:
+        event_callback(event)
+    except Exception:
+        return
 
 
 def read_artifacts(run_root: Path | None) -> list[AgentArtifact]:

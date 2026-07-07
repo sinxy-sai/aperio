@@ -645,7 +645,7 @@ textarea {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   overflow: hidden;
   border-left: 1px solid var(--line);
   background: #fbfbfc;
@@ -706,6 +706,85 @@ textarea {
   font-weight: 800;
 }
 
+.trace-list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  max-height: 220px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.trace-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.trace-list-head span,
+.trace-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trace-items {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.trace-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  min-width: 0;
+}
+
+.trace-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+
+.trace-tool .trace-dot,
+.trace-artifact .trace-dot {
+  background: var(--green);
+}
+
+.trace-model .trace-dot {
+  background: #8b6fcb;
+}
+
+.trace-dot.live {
+  background: #d2a640;
+}
+
+.trace-row div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.trace-row strong,
+.trace-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-row strong {
+  font-size: 13px;
+}
+
 .artifact-list {
   display: grid;
   align-content: start;
@@ -756,6 +835,68 @@ pre {
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.markdown-preview {
+  max-height: 460px;
+  overflow: auto;
+  padding: 14px;
+  line-height: 1.68;
+  font-size: 13px;
+}
+
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3 {
+  margin: 0.8em 0 0.45em;
+  line-height: 1.35;
+}
+
+.markdown-preview h1 {
+  font-size: 20px;
+}
+
+.markdown-preview h2 {
+  font-size: 17px;
+}
+
+.markdown-preview h3 {
+  font-size: 15px;
+}
+
+.markdown-preview p,
+.markdown-preview ul,
+.markdown-preview ol,
+.markdown-preview table,
+.markdown-preview pre {
+  margin: 0.55em 0;
+}
+
+.markdown-preview ul,
+.markdown-preview ol {
+  padding-left: 1.35em;
+}
+
+.markdown-preview code {
+  border-radius: 6px;
+  background: #f0f2f5;
+  padding: 0.1em 0.35em;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.markdown-preview table {
+  display: block;
+  width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+
+.markdown-preview th,
+.markdown-preview td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  vertical-align: top;
 }
 
 .empty-state {

@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -96,7 +97,11 @@ async def chat_stream(request: Request) -> StreamingResponse:
     approval_mode = _validate_approval_mode(chat_request.approval_mode)
     run_id = _new_run_id()
     cancel_event = threading.Event()
+    event_queue: Queue[dict[str, Any]] = Queue()
     RUN_CANCEL_EVENTS[run_id] = cancel_event
+
+    def emit_trace(event: dict[str, Any]) -> None:
+        event_queue.put({"type": "trace", "run_id": run_id, "event": event})
 
     def stream_events():
         started = time.time()
@@ -138,10 +143,12 @@ async def chat_stream(request: Request) -> StreamingResponse:
             uploaded_inputs=uploaded_inputs,
             run_id=run_id,
             cancel_event=cancel_event,
+            event_callback=emit_trace,
         )
         future.add_done_callback(lambda completed: _finish_run(run_id, cancel_event, completed))
         tick = 0
         while not future.done():
+            yield from _drain_trace_events(event_queue)
             elapsed = round(time.time() - started, 1)
             if cancel_event.is_set():
                 yield _json_line({"type": "cancelled", "message": "本次运行已停止。", "elapsed": elapsed, "run_id": run_id})
@@ -154,11 +161,24 @@ async def chat_stream(request: Request) -> StreamingResponse:
             yield _json_line({"type": "status", "message": message, "elapsed": elapsed, "run_id": run_id})
             tick += 1
             time.sleep(1)
+        yield from _drain_trace_events(event_queue)
         try:
             result = future.result()
         except Exception as exc:
             yield _json_line({"type": "error", "message": str(exc), "run_id": run_id})
             return
+        yield _json_line(
+            {
+                "type": "trace",
+                "run_id": run_id,
+                "event": {
+                    "type": "phase",
+                    "phase": "result_ready",
+                    "message": f"返回结果，{len(result.artifacts)} 个产物",
+                    "artifact_count": len(result.artifacts),
+                },
+            }
+        )
         yield _json_line({"type": "result", "data": result.to_dict(), "run_id": run_id})
 
     return StreamingResponse(
@@ -296,6 +316,14 @@ def _finish_run(run_id: str, cancel_event: threading.Event, completed: Any) -> N
         except ValueError:
             return
         shutil.rmtree(run_root, ignore_errors=True)
+
+
+def _drain_trace_events(event_queue: Queue[dict[str, Any]]):
+    while True:
+        try:
+            yield _json_line(event_queue.get_nowait())
+        except Empty:
+            return
 
 
 def _safe_run_root(run_id: str) -> Path:

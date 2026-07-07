@@ -24,6 +24,8 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const SESSION_STORE_KEY = "aperio.chat.sessions.v2";
 const LEGACY_SESSION_STORE_KEY = "aperio.chat.sessions.v1";
@@ -97,6 +99,7 @@ function ChatPage({ navigate }) {
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [artifacts, setArtifacts] = useState([]);
+  const [traceEvents, setTraceEvents] = useState([]);
   const [runMeta, setRunMeta] = useState("等待任务");
   const [running, setRunning] = useState(false);
   const [draftAssistant, setDraftAssistant] = useState("");
@@ -173,6 +176,7 @@ function ChatPage({ navigate }) {
     setActiveId(id);
     setSelectedRunId(session.runId || "");
     setArtifacts([]);
+    setTraceEvents([]);
     setDraftAssistant("");
     saveSessions(sessions, id);
     navigate(`/?session=${encodeURIComponent(id)}`);
@@ -184,6 +188,7 @@ function ChatPage({ navigate }) {
     setSessions(next);
     setActiveId(session.id);
     setArtifacts([]);
+    setTraceEvents([]);
     setSelectedRunId("");
     setDraftAssistant("");
     setRunMeta("等待任务");
@@ -193,6 +198,7 @@ function ChatPage({ navigate }) {
   function clearChat() {
     patchActiveSession({ title: "新对话", messages: [], runId: "" });
     setArtifacts([]);
+    setTraceEvents([]);
     setSelectedRunId("");
     setDraftAssistant("");
     setRunMeta("等待任务");
@@ -226,6 +232,7 @@ function ChatPage({ navigate }) {
     setActiveId(nextActive);
     if (id === activeSession?.id) {
       setArtifacts([]);
+      setTraceEvents([]);
       setSelectedRunId(ordered[0]?.runId || "");
       setDraftAssistant("");
       navigate(`/?session=${encodeURIComponent(nextActive)}`);
@@ -323,6 +330,7 @@ function ChatPage({ navigate }) {
     setRunning(true);
     setDraftAssistant("正在连接后端...");
     setRunMeta("agent 正在处理");
+    setTraceEvents([]);
     const stream = { controller: new AbortController(), runId: "", stopped: false };
     streamRef.current = stream;
 
@@ -344,6 +352,10 @@ function ChatPage({ navigate }) {
         if (eventData.type === "status") {
           setDraftAssistant(eventData.message || "agent 正在运行");
           setRunMeta(`运行中 · ${Number(eventData.elapsed || 0).toFixed(1)}s`);
+          return;
+        }
+        if (eventData.type === "trace") {
+          setTraceEvents((current) => [...current.slice(-79), normalizeTraceEvent(eventData.event)]);
           return;
         }
         if (eventData.type === "cancelled") {
@@ -527,8 +539,8 @@ function ChatPage({ navigate }) {
       <aside className="artifacts">
         <div className="artifact-head">
           <div>
-            <p className="eyebrow">Trace Console</p>
-            <h2>运行台</h2>
+            <p className="eyebrow">Artifacts</p>
+            <h2>产物</h2>
           </div>
           <div className="artifact-actions">
             <span>{selectedRunId || "未运行"}</span>
@@ -539,6 +551,7 @@ function ChatPage({ navigate }) {
         <div className="panel-tabs">
           <button className="panel-tab active" type="button">产物</button>
         </div>
+        <TraceList events={traceEvents} running={running} />
         <div className="artifact-list">
           {!artifacts.length ? (
             <div className="empty-state">完成一次任务后，这里会显示 Markdown 报告和性能文件。</div>
@@ -814,14 +827,59 @@ function Message({ role, text }) {
   );
 }
 
+function TraceList({ events, running }) {
+  if (!events.length && !running) return null;
+  return (
+    <section className="trace-list">
+      <div className="trace-list-head">
+        <strong>执行轨迹</strong>
+        <span>{running ? "运行中" : `${events.length} events`}</span>
+      </div>
+      <div className="trace-items">
+        {!events.length ? (
+          <div className="trace-row muted">
+            <span className="trace-dot live" />
+            <div>
+              <strong>等待 agent 事件</strong>
+              <small>正在建立运行上下文</small>
+            </div>
+          </div>
+        ) : (
+          events.slice(-18).map((event, index) => <TraceRow event={event} key={`${event.phase || event.type}-${index}`} />)
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TraceRow({ event }) {
+  const kind = event.type === "tool" ? "tool" : event.type === "model" ? "model" : event.type === "artifact" ? "artifact" : "phase";
+  return (
+    <div className={`trace-row trace-${kind}`}>
+      <span className="trace-dot" />
+      <div>
+        <strong>{event.message || traceTitle(event)}</strong>
+        <small>{traceMeta(event)}</small>
+      </div>
+    </div>
+  );
+}
+
 function ArtifactCard({ runId, artifact }) {
+  const isMarkdown = artifact.path?.toLowerCase().endsWith(".md");
   return (
     <section className="artifact-card">
       <div className="artifact-title">
         <span>{artifact.path} · {artifact.size} bytes</span>
         <a href={`/api/runs/${encodeURIComponent(runId)}/artifact?path=${encodeURIComponent(artifact.path)}`}>下载</a>
       </div>
-      <pre>{artifact.preview || "(empty)"}</pre>
+      {isMarkdown ? (
+        <div className="markdown-preview">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact.preview || ""}</ReactMarkdown>
+        </div>
+      ) : (
+        <pre>{artifact.preview || "(empty)"}</pre>
+      )}
     </section>
   );
 }
@@ -955,6 +1013,33 @@ function attachmentIcon(item) {
     return <FileText size={16} />;
   }
   return <FileIcon size={16} />;
+}
+
+function normalizeTraceEvent(event) {
+  return event && typeof event === "object" ? event : { type: "phase", message: String(event || "agent event") };
+}
+
+function traceTitle(event) {
+  if (event.type === "model") return `${event.agent || "agent"} 模型调用`;
+  if (event.type === "tool") return `${event.agent || "agent"} 调用 ${event.tool || "tool"}`;
+  if (event.type === "artifact") return `生成产物 ${event.path || ""}`.trim();
+  return event.phase || event.type || "agent event";
+}
+
+function traceMeta(event) {
+  const parts = [];
+  if (event.agent && event.type !== "model" && event.type !== "tool") parts.push(event.agent);
+  if (event.tool && event.type !== "tool") parts.push(event.tool);
+  if (event.route) parts.push(event.route);
+  if (event.elapsed_ms != null) parts.push(`${Number(event.elapsed_ms || 0).toFixed(1)} ms`);
+  if (event.tokens) {
+    const input = Number(event.tokens.input_tokens || 0);
+    const output = Number(event.tokens.output_tokens || 0);
+    parts.push(`${input}/${output} tok`);
+  }
+  if (event.path) parts.push(event.path);
+  if (event.error) parts.push(`error: ${event.error}`);
+  return parts.join(" · ") || event.phase || "trace";
 }
 
 function requestBody(message, approvalMode, timeoutSeconds, attachments, signal) {

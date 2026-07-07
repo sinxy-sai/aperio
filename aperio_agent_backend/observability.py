@@ -39,10 +39,11 @@ class RunTelemetry:
 class TelemetryMiddleware(AgentMiddleware):
     """Collect lightweight model/tool timing for a single Aperio run."""
 
-    def __init__(self, telemetry: RunTelemetry, agent_name: str) -> None:
+    def __init__(self, telemetry: RunTelemetry, agent_name: str, event_callback: Any | None = None) -> None:
         super().__init__()
         self.telemetry = telemetry
         self.agent_name = agent_name
+        self.event_callback = event_callback
 
     def wrap_model_call(self, request, handler):
         started = time.perf_counter()
@@ -103,6 +104,7 @@ class TelemetryMiddleware(AgentMiddleware):
         if error:
             event["error"] = error
         self.telemetry.events.append(event)
+        _emit_event(self.event_callback, event)
 
     def _record_tool(self, tool_name: str, elapsed: float, error: str = "") -> None:
         self.telemetry.tool_calls += 1
@@ -117,6 +119,7 @@ class TelemetryMiddleware(AgentMiddleware):
         if error:
             event["error"] = error
         self.telemetry.events.append(event)
+        _emit_event(self.event_callback, event)
 
 
 def _tool_name(request: Any) -> str:
@@ -125,6 +128,15 @@ def _tool_name(request: Any) -> str:
         return str(getattr(tool, "name", "unknown"))
     call = getattr(request, "tool_call", {}) or {}
     return str(call.get("name") or "unknown")
+
+
+def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
+    if event_callback is None:
+        return
+    try:
+        event_callback(event)
+    except Exception:
+        return
 
 
 def _usage_metadata(response: Any | None) -> dict[str, int]:

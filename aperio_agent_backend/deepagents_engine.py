@@ -50,6 +50,7 @@ def run_deep_agent(
     code_scan_summary: dict[str, Any] | None = None,
     approval_mode: str = "approve",
     cancel_event: Any | None = None,
+    event_callback: Any | None = None,
 ) -> str:
     """Run the package-native DeepAgents implementation.
 
@@ -58,6 +59,7 @@ def run_deep_agent(
     evidence, PRD review outputs, and a pure routing agent.
     """
     run_root.mkdir(parents=True, exist_ok=True)
+    _emit_event(event_callback, {"type": "phase", "phase": "deepagents_start", "message": "Start DeepAgents router"})
     skills_root = copy_packaged_skills(run_root)
     _write_input_files(run_root, message, input_bundle, code_scan_summary)
     write_local_policy(run_root, input_bundle)
@@ -139,7 +141,7 @@ def run_deep_agent(
         middleware=[
             *_runtime_middleware(fallback_model, retry_tools=set()),
             RouterToolGuardMiddleware(router_prompt),
-            TelemetryMiddleware(telemetry, "aperio-router"),
+            TelemetryMiddleware(telemetry, "aperio-router", event_callback=event_callback),
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
@@ -185,11 +187,21 @@ def run_deep_agent(
     if _is_cancelled(cancel_event):
         return "本次运行已停止。"
     _write_observability(run_root, telemetry, mcp_toolset.errors)
+    _emit_event(event_callback, {"type": "phase", "phase": "observability_written", "message": "Observability data written"})
     return _extract_final_answer(response) or "Agent run completed."
 
 
 def _is_cancelled(cancel_event: Any | None) -> bool:
     return cancel_event is not None and cancel_event.is_set()
+
+
+def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
+    if event_callback is None:
+        return
+    try:
+        event_callback(event)
+    except Exception:
+        return
 
 
 def _model():
@@ -297,7 +309,7 @@ def _compiled_code_health_agent(
                 "code-health orchestrator",
                 completed_paths,
             ),
-            TelemetryMiddleware(telemetry, "code-health-orchestrator"),
+            TelemetryMiddleware(telemetry, "code-health-orchestrator", event_callback=event_callback),
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
@@ -342,7 +354,7 @@ def _compiled_prd_agent(
                 "PRD review orchestrator",
                 completed_paths,
             ),
-            TelemetryMiddleware(telemetry, "prd-review-orchestrator"),
+            TelemetryMiddleware(telemetry, "prd-review-orchestrator", event_callback=event_callback),
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
@@ -382,7 +394,7 @@ def _compiled_general_agent(
         middleware=[
             *_runtime_middleware(fallback_model, retry_tools={"read_file", *tool_names}),
             ToolAllowlistMiddleware({"read_file", *tool_names}, "general-purpose"),
-            TelemetryMiddleware(telemetry, "general-purpose"),
+            TelemetryMiddleware(telemetry, "general-purpose", event_callback=event_callback),
         ],
         permissions=permissions,
         interrupt_on=interrupt_on,
@@ -453,7 +465,7 @@ def _code_health_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health architect"),
-                TelemetryMiddleware(telemetry, "code-health.architect"),
+                TelemetryMiddleware(telemetry, "code-health.architect", event_callback=event_callback),
             ],
             "system_prompt": """你是代码架构师。读取 /outputs/code_health/raw/tool_results.json，必要时读取 /inputs/code_scan_summary.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/architect.md。只基于已有扫描事实和输入摘要，不要泛读源码或虚构发现。""",
@@ -465,7 +477,7 @@ def _code_health_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health security analyst"),
-                TelemetryMiddleware(telemetry, "code-health.security-analyst"),
+                TelemetryMiddleware(telemetry, "code-health.security-analyst", event_callback=event_callback),
             ],
             "system_prompt": """你是应用安全工程师。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/security.md。没有确定证据时标为待复核，不要编造漏洞或 CVE。""",
@@ -477,7 +489,7 @@ def _code_health_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health dependency checker"),
-                TelemetryMiddleware(telemetry, "code-health.dependency-checker"),
+                TelemetryMiddleware(telemetry, "code-health.dependency-checker", event_callback=event_callback),
             ],
             "system_prompt": """你是依赖管理专家。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/dependencies.md。pip-audit 跳过或超时时必须明确说明不能证明依赖安全。""",
@@ -489,7 +501,7 @@ def _code_health_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health doc reviewer"),
-                TelemetryMiddleware(telemetry, "code-health.doc-reviewer"),
+                TelemetryMiddleware(telemetry, "code-health.doc-reviewer", event_callback=event_callback),
             ],
             "system_prompt": """你是技术文档专家。读取 /outputs/code_health/raw/tool_results.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/documentation.md。重点说明文档、测试和覆盖率证据是否充分。""",
@@ -506,7 +518,7 @@ def _code_health_reviewers(
                     "code-health summarizer",
                     completed_paths,
                 ),
-                TelemetryMiddleware(telemetry, "code-health.summarizer"),
+                TelemetryMiddleware(telemetry, "code-health.summarizer", event_callback=event_callback),
             ],
             "system_prompt": """你是代码健康报告编辑。读取：
 - /outputs/code_health/raw/tool_results.json
@@ -564,7 +576,7 @@ def _prd_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file", "internet_search", *web_tool_names}),
                 ToolAllowlistMiddleware({"read_file", "write_file", "internet_search", *web_tool_names}, "PRD product strategist"),
-                TelemetryMiddleware(telemetry, "prd-review.product-strategist"),
+                TelemetryMiddleware(telemetry, "prd-review.product-strategist", event_callback=event_callback),
             ],
             "system_prompt": """你是产品策略分析师。读取 /outputs/prd_review/prd_v1.md。
 如果 internet_search 工具可用，最多调用 1 次并保存到 /outputs/prd_review/raw/web_search/product-strategy.json；如果工具不可用，不要假装已经联网搜索。
@@ -577,7 +589,7 @@ def _prd_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD technical feasibility reviewer"),
-                TelemetryMiddleware(telemetry, "prd-review.technical-feasibility"),
+                TelemetryMiddleware(telemetry, "prd-review.technical-feasibility", event_callback=event_callback),
             ],
             "system_prompt": """你是技术架构师。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_tech.md。重点指出技术风险、依赖和验收可测性。""",
@@ -589,7 +601,7 @@ def _prd_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD UX researcher"),
-                TelemetryMiddleware(telemetry, "prd-review.ux-researcher"),
+                TelemetryMiddleware(telemetry, "prd-review.ux-researcher", event_callback=event_callback),
             ],
             "system_prompt": """你是 UX 研究员。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_ux.md。重点检查场景、流程、异常状态和用户反馈。""",
@@ -601,7 +613,7 @@ def _prd_reviewers(
             "middleware": [
                 *_runtime_middleware(fallback_model, retry_tools={"read_file"}),
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "PRD risk analyst"),
-                TelemetryMiddleware(telemetry, "prd-review.risk-analyst"),
+                TelemetryMiddleware(telemetry, "prd-review.risk-analyst", event_callback=event_callback),
             ],
             "system_prompt": """你是项目风险分析师。读取 /outputs/prd_review/prd_v1.md。
 输出中文 Markdown 草稿到 /outputs/prd_review/drafts/review_risk.md。风险必须可追溯到 PRD 或用户输入。""",
@@ -618,7 +630,7 @@ def _prd_reviewers(
                     "PRD editor",
                     completed_paths,
                 ),
-                TelemetryMiddleware(telemetry, "prd-review.editor"),
+                TelemetryMiddleware(telemetry, "prd-review.editor", event_callback=event_callback),
             ],
             "system_prompt": """你是 PRD 编辑。读取：
 - /outputs/prd_review/prd_v1.md
