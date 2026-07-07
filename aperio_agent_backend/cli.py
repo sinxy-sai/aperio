@@ -39,6 +39,7 @@ from .config import (
     get_scan_sandbox_mode,
     save_default_config,
 )
+from .memory import add_memory, delete_memory, list_memories, memory_db_path, memory_enabled, search_memories
 from .resources import packaged_skills_root
 from .runner import run_agent
 
@@ -79,6 +80,9 @@ COMMAND_SPECS = [
     CommandSpec("/retry", "重新运行上一条 prompt"),
     CommandSpec("/serve", "启动本地 Web UI", "/serve [port]", aliases=("/web",)),
 ]
+
+
+COMMAND_SPECS.insert(-2, CommandSpec("/memory", "查看持久 memory", "/memory [add|delete|path] ...", aliases=("/mem",)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,6 +216,8 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
         _print_last_result(state)
     elif command == "/history":
         _print_history(state, _parse_limit(args, default=12, maximum=100))
+    elif command in {"/memory", "/mem"}:
+        _handle_memory_command(args)
     elif command == "/clear":
         state.history.clear()
         print("Cleared in-memory CLI history.")
@@ -327,6 +333,60 @@ def _print_history(state: ReplState, limit: int) -> None:
         if len(text) > 120:
             text = text[:117] + "..."
         print(f"{item['role']}: {text}")
+
+
+def _handle_memory_command(args: list[str]) -> None:
+    if not args:
+        _print_memories(20)
+        return
+    action = args[0].lower()
+    if action == "path":
+        print(f"enabled = {memory_enabled()}")
+        print(memory_db_path())
+        return
+    if action in {"search", "find"}:
+        query = " ".join(args[1:]).strip()
+        if not query:
+            print("Usage: /memory search <query>")
+            return
+        _print_memory_items(search_memories(query, limit=20))
+        return
+    if action == "add":
+        content = " ".join(args[1:]).strip()
+        if not content:
+            print("Usage: /memory add <content>")
+            return
+        item = add_memory(kind="manual", content=content)
+        print(f"Added memory #{item.id}" if item else "Memory is disabled or empty.")
+        return
+    if action in {"delete", "del", "remove", "rm"}:
+        if len(args) < 2 or not args[1].isdigit():
+            print("Usage: /memory delete <id>")
+            return
+        ok = delete_memory(int(args[1]))
+        print("Deleted." if ok else "Memory not found.")
+        return
+    if action.isdigit():
+        _print_memories(int(action))
+        return
+    print("Usage: /memory [n] | /memory search <query> | /memory add <content> | /memory delete <id> | /memory path")
+
+
+def _print_memories(limit: int) -> None:
+    print(f"Memory: {'enabled' if memory_enabled() else 'disabled'} | {memory_db_path()}")
+    _print_memory_items(list_memories(limit=limit))
+
+
+def _print_memory_items(items: list[Any]) -> None:
+    if not items:
+        print("No persistent memories.")
+        return
+    for item in items:
+        text = item.content.replace("\n", " ")
+        if len(text) > 160:
+            text = text[:157] + "..."
+        key = f" {item.key}" if item.key else ""
+        print(f"#{item.id} [{item.scope}/{item.kind}{key}] {text}")
 
 
 def _print_welcome(state: ReplState) -> None:

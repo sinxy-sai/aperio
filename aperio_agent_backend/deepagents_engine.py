@@ -164,6 +164,8 @@ def run_deep_agent(
             "Images, PDFs, Office files, archives, and other binary files cannot be visually or binary-inspected by the current text-only model endpoint; "
             "do not call read_file on those binary paths unless a text extraction tool is available.\n"
         )
+    if (input_bundle.get("persistent_memory") or {}).get("enabled"):
+        runtime_notes += "- Persistent memory is available at /inputs/persistent_memory.md. Use it as background context, but do not treat old memories as current facts without checking dates.\n"
 
     config = {"configurable": {"thread_id": run_root.name}}
     response = router.invoke(
@@ -280,6 +282,10 @@ def _write_input_files(
     (inputs_dir / "user_request.md").write_text(message.strip() + "\n", encoding="utf-8")
     (inputs_dir / "input_bundle.json").write_text(
         json.dumps(input_bundle, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (inputs_dir / "persistent_memory.md").write_text(
+        str((input_bundle.get("persistent_memory") or {}).get("markdown") or "No persistent memory has been recorded yet.") + "\n",
         encoding="utf-8",
     )
     (inputs_dir / "code_scan_summary.json").write_text(

@@ -33,6 +33,9 @@ PROJECT_ROOT = Path(_env_or("APERIO_PROJECT_ROOT", str(Path.cwd()))).expanduser(
 WORKSPACE_ROOT = Path(
     _env_or("APERIO_WORKSPACE_ROOT", str(APERIO_HOME / "workspace"))
 ).expanduser().resolve()
+MEMORY_DB_PATH = Path(
+    _env_or("APERIO_MEMORY_DB", str(APERIO_HOME / "memory.sqlite3"))
+).expanduser().resolve()
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,14 @@ def get_sandbox_image() -> str:
 
 def get_enable_mcp_tools() -> bool:
     return os.environ.get("APERIO_ENABLE_MCP", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_memory_enabled() -> bool:
+    return os.environ.get("APERIO_MEMORY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def get_memory_db_path() -> Path:
+    return MEMORY_DB_PATH
 
 
 def get_amap_api_key() -> str:

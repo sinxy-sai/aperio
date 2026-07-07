@@ -28,6 +28,7 @@ from aperio_agent_backend.config import (
     get_model_name,
     get_scan_sandbox_mode,
 )
+from aperio_agent_backend.memory import add_memory, delete_memory, list_memories, memory_db_path, memory_enabled
 from aperio_agent_backend.runner import UploadedInput, read_artifacts, run_agent, safe_artifact_path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -45,6 +46,13 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
     approval_mode: str = Field(default="approve")
     timeout_seconds: int = Field(default=900, ge=30, le=3600)
+
+
+class MemoryRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    kind: str = Field(default="note", max_length=80)
+    scope: str = Field(default="project", max_length=80)
+    key: str = Field(default="", max_length=200)
 
 
 app = FastAPI(title="Aperio Agent Web")
@@ -80,7 +88,33 @@ def health() -> dict[str, Any]:
         "enabledChannels": get_enabled_channels(),
         "workspace": str(WORKSPACE_ROOT),
         "configured": bool(get_api_key()),
+        "memoryEnabled": memory_enabled(),
+        "memoryDb": str(memory_db_path()),
     }
+
+
+@app.get("/api/memories")
+def memories(limit: int = 50, scope: str | None = None, kind: str | None = None, q: str = "") -> dict[str, Any]:
+    items = list_memories(scope=scope, kind=kind, query=q, limit=limit)
+    return {
+        "enabled": memory_enabled(),
+        "database": str(memory_db_path()),
+        "query": q,
+        "memories": [_memory_item_dict(item) for item in items],
+    }
+
+
+@app.post("/api/memories")
+def create_memory(request: MemoryRequest) -> dict[str, Any]:
+    item = add_memory(kind=request.kind, scope=request.scope, key=request.key, content=request.content)
+    if item is None:
+        raise HTTPException(status_code=400, detail="Memory is disabled or content is empty")
+    return {"ok": True, "memory": _memory_item_dict(item)}
+
+
+@app.delete("/api/memories/{memory_id}")
+def remove_memory(memory_id: int) -> dict[str, Any]:
+    return {"ok": delete_memory(memory_id), "memoryId": memory_id}
 
 
 @app.post("/api/chat")
@@ -472,6 +506,19 @@ def _parse_run_datetime(run_id: str) -> datetime | None:
 
 def _is_failed_run(item: dict[str, Any]) -> bool:
     return item.get("ok") is False or item.get("route") == "error" or bool(item.get("error"))
+
+
+def _memory_item_dict(item: Any) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "scope": item.scope,
+        "kind": item.kind,
+        "key": item.key,
+        "content": item.content,
+        "metadata": item.metadata,
+        "createdAt": item.created_at,
+        "updatedAt": item.updated_at,
+    }
 
 
 def _percentile(values: list[float], percentile: int) -> float:

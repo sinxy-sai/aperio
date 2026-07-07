@@ -21,6 +21,7 @@ from .config import (
     get_scan_sandbox_mode,
 )
 from .deepagents_engine import run_deep_agent
+from .memory import build_memory_context, record_run_memory
 from .scanner import compact_scan_summary, run_code_health_scan
 
 
@@ -129,6 +130,8 @@ def run_agent(
             answer = _binary_upload_limitation_answer(message, uploaded_metadata)
             _write_answer(run_root, answer)
             _write_performance(run_root, started, route, ok=True)
+            artifacts = _read_artifacts(run_root)
+            record_run_memory(run_id=run_id, route=route, user_message=message, answer=answer, artifacts=artifacts)
             _emit_event(event_callback, {"type": "phase", "phase": "run_completed", "message": "运行完成"})
             return AgentRunResult(
                 ok=True,
@@ -136,7 +139,7 @@ def run_agent(
                 duration_seconds=round(time.time() - started, 1),
                 answer=answer,
                 run_id=run_id,
-                artifacts=_read_artifacts(run_root),
+                artifacts=artifacts,
                 route=route,
             )
 
@@ -182,6 +185,7 @@ def run_agent(
         _write_answer(run_root, answer)
         _write_performance(run_root, started, route, ok=True)
         artifacts = _read_artifacts(run_root)
+        record_run_memory(run_id=run_id, route=route, user_message=message, answer=answer, artifacts=artifacts)
         for artifact in artifacts:
             _emit_event(
                 event_callback,
@@ -228,13 +232,15 @@ def run_agent(
         _write_text(run_root / "error.txt", message_text)
         _write_answer(run_root, message_text)
         _write_performance(run_root, started, "error", ok=False, error=str(exc))
+        error_artifacts = _read_artifacts(run_root)
+        record_run_memory(run_id=run_id, route="error", user_message=message, answer=message_text, artifacts=error_artifacts)
         return AgentRunResult(
             ok=False,
             return_code=1,
             duration_seconds=round(time.time() - started, 1),
             answer=message_text,
             run_id=run_id,
-            artifacts=_read_artifacts(run_root),
+            artifacts=error_artifacts,
             stderr_tail=str(exc),
             route="error",
         )
@@ -358,6 +364,7 @@ def build_input_bundle(
             "fallback_agent": "general-purpose",
             "demo_runtime_dependency": False,
         },
+        "persistent_memory": build_memory_context(query=task_text),
     }
 
 
@@ -406,6 +413,10 @@ def _write_input_files_for_run(run_root: Path, message: str, input_bundle: dict[
     inputs_dir.mkdir(parents=True, exist_ok=True)
     _write_text(inputs_dir / "user_request.md", message)
     _write_text(inputs_dir / "input_bundle.json", json.dumps(input_bundle, ensure_ascii=False, indent=2))
+    _write_text(
+        inputs_dir / "persistent_memory.md",
+        str((input_bundle.get("persistent_memory") or {}).get("markdown") or "No persistent memory has been recorded yet."),
+    )
 
 
 def _should_return_binary_upload_limitation(route: str, attachments: list[dict[str, Any]]) -> bool:
