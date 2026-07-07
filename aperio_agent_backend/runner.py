@@ -115,6 +115,18 @@ def run_agent(
                     "file_count": len(uploaded_metadata),
                 },
             )
+        upload_code_context = resolve_uploaded_code_context(run_root, uploaded_metadata)
+        if upload_code_context is not None:
+            code_project_path, code_target_rel, code_target_path, code_context_found = upload_code_context
+            _emit_event(
+                event_callback,
+                {
+                    "type": "phase",
+                    "phase": "upload_code_context_selected",
+                    "message": f"使用上传目录作为代码体检目标: {code_target_rel}",
+                    "target": str(code_target_path),
+                },
+            )
         _raise_if_cancelled(cancel_event)
         input_bundle = build_input_bundle(
             run_id=run_id,
@@ -316,6 +328,66 @@ def resolve_code_context(task_text: str) -> tuple[Path, str, Path, bool]:
 
     project_root = PROJECT_ROOT.resolve()
     return project_root, ".", project_root, False
+
+
+def resolve_uploaded_code_context(run_root: Path, uploaded_metadata: list[dict[str, Any]]) -> tuple[Path, str, Path, bool] | None:
+    if not uploaded_metadata:
+        return None
+    upload_root = (run_root / "inputs" / "uploads").resolve()
+    common_top = _common_upload_top_level(uploaded_metadata)
+    if common_top:
+        project_root = (upload_root / common_top).resolve()
+        try:
+            project_root.relative_to(upload_root)
+        except ValueError:
+            project_root = upload_root
+        if project_root.exists():
+            return project_root, ".", project_root, True
+
+    candidates = []
+    for item in uploaded_metadata:
+        rel_path = _safe_upload_path(str(item.get("relative_path") or item.get("filename") or ""))
+        if not rel_path:
+            continue
+        candidate = (upload_root / rel_path).resolve()
+        try:
+            candidate.relative_to(upload_root)
+        except ValueError:
+            continue
+        if candidate.exists():
+            candidates.append(candidate)
+    if not candidates:
+        return upload_root, ".", upload_root, True
+
+    project_roots = [infer_project_root(candidate) for candidate in candidates]
+    project_root = _most_common_project_root(project_roots, upload_root)
+    target_path = project_root if project_root.exists() else upload_root
+    return project_root, ".", target_path, True
+
+
+def _common_upload_top_level(uploaded_metadata: list[dict[str, Any]]) -> str:
+    top_levels = []
+    for item in uploaded_metadata:
+        rel_path = _safe_upload_path(str(item.get("relative_path") or item.get("filename") or ""))
+        parts = [part for part in rel_path.replace("\\", "/").split("/") if part]
+        if len(parts) > 1:
+            top_levels.append(parts[0])
+    if not top_levels:
+        return ""
+    first = top_levels[0]
+    if all(part == first for part in top_levels):
+        return first
+    return ""
+
+
+def _most_common_project_root(project_roots: list[Path], fallback: Path) -> Path:
+    counts: dict[Path, int] = {}
+    for root in project_roots:
+        resolved = root.resolve()
+        counts[resolved] = counts.get(resolved, 0) + 1
+    if not counts:
+        return fallback.resolve()
+    return sorted(counts.items(), key=lambda item: (-item[1], len(str(item[0]))))[0][0]
 
 
 def build_input_bundle(

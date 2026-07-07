@@ -58,8 +58,13 @@ def iter_project_files(root: Path) -> list[Path]:
     files: list[Path] = []
     if not root.exists():
         return files
+    root = root.resolve()
     for path in sorted(root.rglob("*")):
-        if any(part in EXCLUDED_DIR_NAMES for part in path.parts):
+        try:
+            relative_parts = path.resolve().relative_to(root).parts
+        except ValueError:
+            relative_parts = path.parts
+        if any(part in EXCLUDED_DIR_NAMES for part in relative_parts):
             continue
         if path.is_file():
             files.append(path)
