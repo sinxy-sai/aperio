@@ -1,6 +1,6 @@
 # 代码坏味道检查参考
 
-使用本参考时，先读取 `/outputs/code_health/raw/tool_results.json`，再按需读取源码。不要把清单机械写满；只报告有证据的坏味道，并标注证据来源。
+使用本参考时，先读取 `/outputs/code_health/raw/tool_results.compact.json`，再按需读取源码。不要读取完整 `/outputs/code_health/raw/tool_results.json`，它只用于下载和审计。不要把清单机械写满；只报告有证据的坏味道，并标注证据来源。
 
 ## 可用证据
 

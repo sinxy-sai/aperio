@@ -100,6 +100,37 @@ class UploadedBinaryReadGuardMiddleware(AgentMiddleware):
         )
 
 
+class CodeHealthRawReadGuardMiddleware(AgentMiddleware):
+    """Keep huge scanner JSON out of model context unless explicitly bypassed in code."""
+
+    raw_path = "/outputs/code_health/raw/tool_results.json"
+    compact_path = "/outputs/code_health/raw/tool_results.compact.json"
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        message = self._guard_message(request)
+        if message is not None:
+            return _text_tool_message(request, message)
+        return handler(request)
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        message = self._guard_message(request)
+        if message is not None:
+            return _text_tool_message(request, message)
+        return await handler(request)
+
+    def _guard_message(self, request: Any) -> str | None:
+        if _request_tool_name(request) != "read_file":
+            return None
+        path = _normalize_virtual_path(_read_file_path(_request_args(request)))
+        if path != self.raw_path:
+            return None
+        return (
+            f"`{self.raw_path}` is the full deterministic scanner output and can be very large. "
+            f"Read `{self.compact_path}` for model-facing evidence instead. The full raw JSON remains on disk "
+            "for downloads, audits, and non-LLM backend fallback code."
+        )
+
+
 class FinalOutputGuardMiddleware(AgentMiddleware):
     """Stop follow-up tool calls after declared final artifacts are written."""
 

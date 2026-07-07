@@ -124,6 +124,7 @@ def run_command(
             check=False,
         )
         output = completed.stdout or ""
+        parsed = parse_json_output(output)
         result: dict[str, Any] = {
             "available": True,
             "command": command,
@@ -133,6 +134,8 @@ def run_command(
             "output_truncated": len(output) > max_output,
             "note": note,
         }
+        if parsed is not None:
+            result["json"] = parsed
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
         result = {
@@ -148,9 +151,6 @@ def run_command(
         }
     if timeout_seconds is not None:
         result["timeout_seconds"] = timeout_seconds
-    parsed = parse_json_output(result.get("output", ""))
-    if parsed is not None:
-        result["json"] = parsed
     return result
 
 

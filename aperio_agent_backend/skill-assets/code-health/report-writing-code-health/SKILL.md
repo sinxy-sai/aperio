@@ -17,7 +17,7 @@ description: Use when merging code-health drafts into the final Aperio code heal
 
 ## 输入契约
 
-- 必须读取 `/outputs/code_health/raw/tool_results.json`。
+- 必须读取 `/outputs/code_health/raw/tool_results.compact.json`。不要读取完整 `/outputs/code_health/raw/tool_results.json`，它只用于下载和审计。
 - 只能把这四个草稿作为有效输入：
   - `/outputs/code_health/drafts/architect.md`
   - `/outputs/code_health/drafts/security.md`
@@ -28,7 +28,7 @@ description: Use when merging code-health drafts into the final Aperio code heal
 
 ## 证据规则
 
-1. 优先使用 `/outputs/code_health/raw/tool_results.json` 中的事实，再使用 `drafts/` 下各角色草稿。
+1. 优先使用 `/outputs/code_health/raw/tool_results.compact.json` 中的事实，再使用 `drafts/` 下各角色草稿。
 2. 把结论区分为三类：**工具事实**、**人工判断**、**行动建议**。
 3. 不要把“工具未运行、超时、被跳过”写成“无问题”；应写成“未覆盖”或“置信度降低”。
 4. 没有证据时不要声称具体 CVE、最新版本、漏洞可利用性、测试覆盖率或 docstring 覆盖率。
@@ -42,9 +42,9 @@ description: Use when merging code-health drafts into the final Aperio code heal
 
 ## 严重度规则
 
-- 最终报告的风险数量必须优先来自 `tool_results.json.findings_summary` 和 `tool_results.json.findings`。
+- 最终报告的风险数量必须优先来自 `tool_results.compact.json.findings_summary` 和 `tool_results.compact.json.findings`。
 - 对每条工具发现，最终严重度不得高于 `findings[].severity`，除非草稿提供了明确源码位置、可复现影响和修复建议，并说明为什么工具等级不足；没有这三项时只能保持或降低严重度。
-- 如果 `tool_results.json.findings` 中没有 Critical，最终报告不要生成 Critical。只有存在明确可利用安全漏洞、真实密钥泄露、可复现数据破坏或生产阻断证据时，才允许 Critical。
+- 如果 `tool_results.compact.json.findings` 中没有 Critical，最终报告不要生成 Critical。只有存在明确可利用安全漏洞、真实密钥泄露、可复现数据破坏或生产阻断证据时，才允许 Critical。
 - High 以上发现必须同时具备：具体位置、证据来源、影响说明、最小修复建议。缺任一项时最高只能列为 Medium。
 - `interrogate` 的 docstring 覆盖率低、`coverage` 未运行、`pytest` 跳过、`pip-audit` 跳过、`mypy --ignore-missing-imports` 都属于覆盖限制或质量风险，不能单独升级为 Critical。
 - JWT 无吊销机制、日志/监控不足、架构可演进性不足这类人工判断，除非有源码证据证明直接导致高危安全结果，否则最高列为 Medium。

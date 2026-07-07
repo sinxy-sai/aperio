@@ -31,6 +31,7 @@ from .config import (
 from .hitl import build_interrupt_policy, resolve_human_interrupts
 from .event_protocol import normalize_event
 from .middleware import (
+    CodeHealthRawReadGuardMiddleware,
     FinalOutputGuardMiddleware,
     RouterToolGuardMiddleware,
     ToolAllowlistMiddleware,
@@ -180,7 +181,7 @@ def run_deep_agent(
                         "- /inputs/input_bundle.json 是标准化输入包。\n"
                         "- /inputs/user_request.md 是用户原始请求。\n"
                         "- /local-resources/aperio_policy.yaml 是本次运行的安全、存储、输出策略。\n"
-                        "- 如果是代码健康任务，/outputs/code_health/raw/tool_results.json 是后端扫描器生成的确定性证据。\n\n"
+                        "- 如果是代码健康任务，/outputs/code_health/raw/tool_results.compact.json 是给模型读取的确定性扫描证据；完整 raw JSON 仅用于下载和审计。\n\n"
                         f"{runtime_notes}"
                         "请只通过 task 委托给合适的子 agent，完成后用中文简要返回结果和产物路径。"
                     ),
@@ -258,6 +259,7 @@ def _runtime_middleware(fallback_model: Any | None, retry_tools: set[str] | None
     if fallback_model is not None:
         middleware.append(ModelFallbackMiddleware(fallback_model))
     middleware.append(UploadedBinaryReadGuardMiddleware())
+    middleware.append(CodeHealthRawReadGuardMiddleware())
     if retry_tools is None:
         retry_tools = {"read_file", "internet_search"}
     if retry_tools:
@@ -452,10 +454,11 @@ def _code_health_prompt() -> str:
 - /inputs/user_request.md：用户原始请求。
 - /inputs/input_bundle.json：标准化输入包，包含项目路径、目标路径和运行上下文。
 - /local-resources/aperio_policy.yaml：安全、工具、存储和最终产物策略。
-- /outputs/code_health/raw/tool_results.json：后端已执行的确定性扫描结果。
+- /outputs/code_health/raw/tool_results.compact.json：后端已执行扫描结果的模型友好压缩证据。
+- /outputs/code_health/raw/tool_results.json：完整原始扫描结果，仅用于下载、审计和后端兜底；不要在 agent 上下文中读取。
 
 工作流：
-1. 先读取 /local-resources/aperio_policy.yaml、/outputs/code_health/raw/tool_results.json 和 /inputs/input_bundle.json。
+1. 先读取 /local-resources/aperio_policy.yaml、/outputs/code_health/raw/tool_results.compact.json 和 /inputs/input_bundle.json。
 2. 使用 task 分别委托四个子 agent，必须生成这四个草稿：
    - /outputs/code_health/drafts/architect.md
    - /outputs/code_health/drafts/security.md
@@ -466,8 +469,8 @@ def _code_health_prompt() -> str:
 
 硬性约束：
 - 全文使用中文；工具名、文件路径、命令、错误码可以保留英文。
-- 优先引用 tool_results.json 中的事实。工具跳过、不可用、超时都必须作为覆盖限制，不要写成“无问题”。
-- 不要声称已经运行 Docker、SAST、测试、依赖审计或联网搜索，除非 tool_results.json 明确包含对应成功结果。
+- 优先引用 tool_results.compact.json 中的事实。工具跳过、不可用、超时都必须作为覆盖限制，不要写成“无问题”。
+- 不要声称已经运行 Docker、SAST、测试、依赖审计或联网搜索，除非 tool_results.compact.json 明确包含对应成功结果。
 - 不要写 HTML、JSON 可视化或别名报告。
 - 如果四个草稿无法全部生成，最终回答必须明确说明缺失项，且不要把本次审查描述为完整通过。"""
 
@@ -489,7 +492,7 @@ def _code_health_reviewers(
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health architect"),
                 TelemetryMiddleware(telemetry, "code-health.architect", event_callback=event_callback),
             ],
-            "system_prompt": """你是代码架构师。读取 /outputs/code_health/raw/tool_results.json，必要时读取 /inputs/code_scan_summary.json。
+            "system_prompt": """你是代码架构师。读取 /outputs/code_health/raw/tool_results.compact.json，必要时读取 /inputs/code_scan_summary.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/architect.md。只基于已有扫描事实和输入摘要，不要泛读源码或虚构发现。""",
         },
         {
@@ -501,7 +504,7 @@ def _code_health_reviewers(
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health security analyst"),
                 TelemetryMiddleware(telemetry, "code-health.security-analyst", event_callback=event_callback),
             ],
-            "system_prompt": """你是应用安全工程师。读取 /outputs/code_health/raw/tool_results.json。
+            "system_prompt": """你是应用安全工程师。读取 /outputs/code_health/raw/tool_results.compact.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/security.md。没有确定证据时标为待复核，不要编造漏洞或 CVE。""",
         },
         {
@@ -513,7 +516,7 @@ def _code_health_reviewers(
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health dependency checker"),
                 TelemetryMiddleware(telemetry, "code-health.dependency-checker", event_callback=event_callback),
             ],
-            "system_prompt": """你是依赖管理专家。读取 /outputs/code_health/raw/tool_results.json。
+            "system_prompt": """你是依赖管理专家。读取 /outputs/code_health/raw/tool_results.compact.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/dependencies.md。pip-audit 跳过或超时时必须明确说明不能证明依赖安全。""",
         },
         {
@@ -525,7 +528,7 @@ def _code_health_reviewers(
                 ToolAllowlistMiddleware({"read_file", "write_file"}, "code-health doc reviewer"),
                 TelemetryMiddleware(telemetry, "code-health.doc-reviewer", event_callback=event_callback),
             ],
-            "system_prompt": """你是技术文档专家。读取 /outputs/code_health/raw/tool_results.json。
+            "system_prompt": """你是技术文档专家。读取 /outputs/code_health/raw/tool_results.compact.json。
 输出中文 Markdown 草稿到 /outputs/code_health/drafts/documentation.md。重点说明文档、测试和覆盖率证据是否充分。""",
         },
         {
@@ -543,7 +546,7 @@ def _code_health_reviewers(
                 TelemetryMiddleware(telemetry, "code-health.summarizer", event_callback=event_callback),
             ],
             "system_prompt": """你是代码健康报告编辑。读取：
-- /outputs/code_health/raw/tool_results.json
+- /outputs/code_health/raw/tool_results.compact.json
 - /outputs/code_health/drafts/architect.md
 - /outputs/code_health/drafts/security.md
 - /outputs/code_health/drafts/dependencies.md

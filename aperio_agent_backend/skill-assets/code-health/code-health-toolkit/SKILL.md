@@ -11,7 +11,7 @@ Use this skill when deterministic code-health evidence is needed before LLM revi
 
 When this skill is used as the first stage of a code-health workflow, run the toolkit script before reading source files. Do not call `ls`, `glob`, `grep`, or `read_file` to explore the target code before the script has produced `tool_results.json`.
 
-After `tool_results.json` exists, use its `discovery`, `tool_coverage`, and `findings` fields to decide which files, if any, need targeted follow-up reading.
+After `tool_results.json` exists, prefer the generated `tool_results.compact.json` for model-facing analysis. Use its `discovery`, `tool_coverage`, `findings`, and compact `tools` summaries to decide which files, if any, need targeted follow-up reading. The full `tool_results.json` is retained for audit/download and should not be read into model context.
 
 ## Script
 

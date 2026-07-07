@@ -23,7 +23,7 @@ from .config import (
 from .deepagents_engine import run_deep_agent
 from .event_protocol import normalize_event
 from .memory import build_memory_context, record_run_memory
-from .scanner import compact_scan_summary, run_code_health_scan
+from .scanner import compact_scan_summary, run_code_health_scan, write_compact_scan_summary
 
 
 KNOWN_ARTIFACTS = (
@@ -32,6 +32,7 @@ KNOWN_ARTIFACTS = (
     "outputs/prd_review/prd_v2_final.md",
     "outputs/prd_review/review_matrix.md",
     "outputs/code_health/raw/tool_results.json",
+    "outputs/code_health/raw/tool_results.compact.json",
     "observability.json",
     "performance.json",
     # Backward-compatible paths from the first backend prototype.
@@ -168,6 +169,10 @@ def run_agent(
                 sandbox_mode=get_scan_sandbox_mode(),
             )
             scan_summary = compact_scan_summary(scan_result)
+            write_compact_scan_summary(
+                run_root / "outputs" / "code_health" / "raw" / "tool_results.compact.json",
+                scan_summary,
+            )
             _emit_event(event_callback, {"type": "phase", "phase": "code_scan_completed", "message": "代码健康扫描完成"})
             _raise_if_cancelled(cancel_event)
 
@@ -433,6 +438,7 @@ def build_input_bundle(
             "outputs": "/outputs",
             "skills": "/skills",
             "code_health_raw_results": "/outputs/code_health/raw/tool_results.json",
+            "code_health_compact_results": "/outputs/code_health/raw/tool_results.compact.json",
         },
         "routing_policy": {
             "router_decides_task": True,
