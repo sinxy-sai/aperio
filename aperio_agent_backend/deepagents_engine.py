@@ -88,7 +88,7 @@ def run_deep_agent(
     mcp_toolset = load_mcp_tools(run_root)
     shared_tools = mcp_toolset.shared
     general_tools = [*mcp_toolset.shared, *mcp_toolset.general_purpose]
-    interrupt_on = build_interrupt_policy()
+    interrupt_on = _interrupt_policy_for_mode(approval_mode)
     router_prompt = _router_prompt()
     code_health_final_paths: set[str] = set()
     prd_review_final_paths: set[str] = set()
@@ -199,6 +199,13 @@ def run_deep_agent(
 
 def _is_cancelled(cancel_event: Any | None) -> bool:
     return cancel_event is not None and cancel_event.is_set()
+
+
+def _interrupt_policy_for_mode(approval_mode: str) -> dict[str, Any]:
+    mode = (approval_mode or "approve").strip().lower()
+    if mode == "approve":
+        return {}
+    return build_interrupt_policy()
 
 
 def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
@@ -455,7 +462,7 @@ def _code_health_prompt() -> str:
    - /outputs/code_health/drafts/dependencies.md
    - /outputs/code_health/drafts/documentation.md
 3. 四个草稿完成后，委托 summarizer 合并最终报告。
-4. 最终产物只能写入 /outputs/code_health/code_health_report.md。
+4. 最终产物只能写入 /outputs/code_health/code_health_report.md。必须实际调用 write_file 写入该路径；只在聊天里说明不算完成。
 
 硬性约束：
 - 全文使用中文；工具名、文件路径、命令、错误码可以保留英文。
@@ -541,7 +548,7 @@ def _code_health_reviewers(
 - /outputs/code_health/drafts/dependencies.md
 - /outputs/code_health/drafts/documentation.md
 
-按 report-writing-code-health skill 的结构生成最终报告，只写入 /outputs/code_health/code_health_report.md。
+按 report-writing-code-health skill 的结构生成最终报告。必须调用 write_file 写入 /outputs/code_health/code_health_report.md；只回复报告正文但不写文件视为失败。
 完成写入后停止，不要创建其他最终报告。""",
         },
     ]
@@ -655,7 +662,7 @@ def _prd_reviewers(
 - /outputs/prd_review/drafts/review_risk.md
 
 按 report-writing-prd 和 review-matrix skills 合并结果。
-只写入 /outputs/prd_review/prd_v2_final.md 和 /outputs/prd_review/review_matrix.md，完成后停止。""",
+必须调用 write_file 分别写入 /outputs/prd_review/prd_v2_final.md 和 /outputs/prd_review/review_matrix.md；只在聊天里返回正文但不写文件视为失败。完成后停止。""",
         },
     ]
 

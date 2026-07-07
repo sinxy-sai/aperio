@@ -119,7 +119,17 @@ class TelemetryMiddleware(AgentMiddleware):
             "tool": tool_name,
             "elapsed_ms": round(elapsed * 1000, 1),
         }
-        if error:
+        if error == "GraphInterrupt":
+            event.update(
+                {
+                    "phase": "approval_requested",
+                    "eventType": "approval.requested",
+                    "event_type": "approval.requested",
+                    "status": "waiting",
+                    "message": f"{tool_name} requested human approval",
+                }
+            )
+        elif error:
             event["error"] = error
         event = normalize_event(event)
         self.telemetry.events.append(event)
