@@ -35,6 +35,9 @@ mcp = [
 sandbox = [
   "docker>=7.0",
 ]
+integrations = [
+  "lark-oapi>=1.5.0,<2.0.0",
+]
 dev = [
   "build>=1.0",
 ]

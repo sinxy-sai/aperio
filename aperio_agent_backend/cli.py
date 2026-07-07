@@ -26,12 +26,18 @@ from .config import (
     WORKSPACE_ROOT,
     get_amap_api_key,
     get_api_key,
+    get_active_provider_name,
     get_base_url,
+    get_config_path,
     get_enable_mcp_tools,
+    get_enabled_channels,
     get_engine_name,
     get_install_project_deps,
     get_model_name,
+    get_channel_config,
+    get_provider_config,
     get_scan_sandbox_mode,
+    save_default_config,
 )
 from .resources import packaged_skills_root
 from .runner import run_agent
@@ -66,6 +72,7 @@ COMMAND_SPECS = [
     CommandSpec("/runs", "列出最近运行", "/runs [n]", aliases=("/ls",)),
     CommandSpec("/artifacts", "列出产物和 trace 文件", "/artifacts [run_id|last]", aliases=("/files",)),
     CommandSpec("/skills", "列出可用 skills", "/skills [filter]"),
+    CommandSpec("/channels", "查看软件渠道配置状态"),
     CommandSpec("/last", "重新打印上次回答", aliases=("/answer",)),
     CommandSpec("/history", "查看当前 CLI 会话历史", "/history [n]"),
     CommandSpec("/clear", "清空当前 CLI 会话历史"),
@@ -86,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_once(args.message, approval_mode=args.approval_mode, timeout_seconds=args.timeout)
     if args.command == "serve":
         return serve(host=args.host, port=args.port, reload=args.reload)
+    if args.command == "gateway":
+        return gateway(channel=args.channel, approval_mode=args.approval_mode, timeout_seconds=args.timeout)
     if args.command == "doctor":
         return doctor()
 
@@ -112,6 +121,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8088)
     serve_parser.add_argument("--reload", action="store_true")
+
+    gateway_parser = subparsers.add_parser("gateway", help="Start a software-channel gateway")
+    gateway_parser.add_argument("channel", choices=("feishu",), help="Channel to start")
+    gateway_parser.add_argument("--approval-mode", choices=("approve", "reject"), default="approve")
+    gateway_parser.add_argument("--timeout", type=int, default=900)
 
     subparsers.add_parser("doctor", help="Check configuration")
     return parser
@@ -192,6 +206,8 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
         _print_run_artifacts(args, state)
     elif command == "/skills":
         _print_skills(args)
+    elif command == "/channels":
+        _print_channels()
     elif command in {"/last", "/answer"}:
         _print_last_result(state)
     elif command == "/history":
@@ -243,12 +259,16 @@ def _set_timeout(args: list[str], state: ReplState) -> None:
 def _print_repl_status(state: ReplState) -> None:
     print("Aperio CLI status")
     print(f"Home:      {APERIO_HOME}")
+    print(f"Config:    {get_config_path()}")
     print(f"Workspace: {WORKSPACE_ROOT}")
     print(f"Engine:    {get_engine_name()}")
     print(f"Model:     {get_model_name()}")
+    print(f"Provider:  {get_active_provider_name()}")
+    print(f"Base URL:  {get_base_url()}")
     print(f"Approval:  {state.approval_mode}")
     print(f"Timeout:   {state.timeout_seconds}s")
     print(f"MCP tools: {'enabled' if get_enable_mcp_tools() else 'disabled'}")
+    print(f"Channels:  {', '.join(get_enabled_channels()) or 'none'}")
     print(f"API key:   {'configured' if get_api_key() else 'missing'}")
 
 
@@ -314,7 +334,7 @@ def _print_welcome(state: ReplState) -> None:
     print("Aperio Agent")
     print("本地多 Agent 工作台。直接输入问题开始任务，输入 / 查看命令，输入 $ 查看 skills。")
     print(f"Workspace: {WORKSPACE_ROOT}")
-    print(f"Model: {get_model_name()} | Approval: {state.approval_mode} | Timeout: {state.timeout_seconds}s")
+    print(f"Model: {get_model_name()} | Provider: {get_active_provider_name()} | Approval: {state.approval_mode} | Timeout: {state.timeout_seconds}s")
     if skills:
         preview = ", ".join(skill["name"] for skill in skills[:4])
         suffix = "" if len(skills) <= 4 else f" ... +{len(skills) - 4}"
@@ -398,6 +418,26 @@ def _print_skills(args: list[str]) -> None:
     for skill in skills:
         desc = f" - {skill['description']}" if skill["description"] else ""
         print(f"  ${skill['name']}  ({skill['path']}){desc}")
+
+
+def _print_channels() -> None:
+    feishu = get_channel_config("feishu")
+    channels = {"feishu": feishu}
+    print("Channels:")
+    for name, config in channels.items():
+        enabled = bool(config.get("enabled"))
+        configured = _channel_configured(name, config)
+        status = "enabled" if enabled else "disabled"
+        readiness = "configured" if configured else "missing required fields"
+        print(f"  {name:<10} {status:<8} {readiness}")
+        if name == "feishu":
+            print(f"             domain={config.get('domain') or 'feishu'} groupPolicy={config.get('groupPolicy') or config.get('group_policy') or 'mention'} streaming={bool(config.get('streaming', True))}")
+
+
+def _channel_configured(name: str, config: dict[str, Any]) -> bool:
+    if name == "feishu":
+        return bool(config.get("appId") or config.get("app_id")) and bool(config.get("appSecret") or config.get("app_secret"))
+    return False
 
 
 def _discover_skills() -> list[dict[str, str]]:
@@ -497,9 +537,13 @@ def run_once(message_parts: list[str], approval_mode: str, timeout_seconds: int)
 def init_config(force: bool = False) -> int:
     APERIO_HOME.mkdir(parents=True, exist_ok=True)
     target = APERIO_HOME / ".env"
+    config_target = get_config_path()
     if target.exists() and not force:
         print(f"Config already exists: {target}")
         print("Use `aperio init --force` to overwrite it.")
+        if not config_target.exists():
+            save_default_config(config_target)
+            print(f"Created config: {config_target}")
         return 0
 
     template = Path(__file__).resolve().parent / ".env.example"
@@ -508,16 +552,30 @@ def init_config(force: bool = False) -> int:
     else:
         target.write_text(
             "DEEPSEEK_API_KEY=\n"
+            "OPENAI_API_KEY=\n"
+            "OPENROUTER_API_KEY=\n"
+            "DASHSCOPE_API_KEY=\n"
+            "MOONSHOT_API_KEY=\n"
+            "SILICONFLOW_API_KEY=\n"
             "APERIO_ENGINE=deepagents\n"
-            "APERIO_MODEL=openai:deepseek-v4-flash\n"
-            "APERIO_BASE_URL=https://api.deepseek.com\n"
+            "APERIO_PROVIDER=\n"
+            "APERIO_MODEL=\n"
+            "APERIO_BASE_URL=\n"
+            "APERIO_CONFIG_PATH=\n"
             "APERIO_INSTALL_PROJECT_DEPS=0\n"
             "APERIO_SCAN_SANDBOX=host\n"
             "APERIO_ENABLE_MCP=0\n"
-            "AMAP_API_KEY=\n",
+            "APERIO_CLI_MOUSE=0\n"
+            "AMAP_API_KEY=\n"
+            "FEISHU_APP_ID=\n"
+            "FEISHU_APP_SECRET=\n"
+            "FEISHU_ENCRYPT_KEY=\n"
+            "FEISHU_VERIFICATION_TOKEN=\n",
             encoding="utf-8",
         )
     print(f"Created config: {target}")
+    save_default_config(config_target, force=force)
+    print(f"Created app config: {config_target}")
     return 0
 
 
@@ -532,17 +590,37 @@ def serve(host: str, port: int, reload: bool = False) -> int:
     return 0
 
 
+def gateway(channel: str, approval_mode: str, timeout_seconds: int) -> int:
+    if channel == "feishu":
+        from .feishu_gateway import FeishuGatewayError, run_feishu_gateway
+
+        try:
+            return run_feishu_gateway(approval_mode=approval_mode, timeout_seconds=timeout_seconds)
+        except FeishuGatewayError as exc:
+            print(f"Gateway error: {exc}", file=sys.stderr)
+            return 1
+    print(f"Unsupported gateway channel: {channel}", file=sys.stderr)
+    return 2
+
+
 def doctor() -> int:
     print("Aperio doctor")
     print(f"Home:      {APERIO_HOME}")
+    print(f"Config:    {get_config_path()} {'found' if get_config_path().exists() else 'missing'}")
     print(f"Workspace: {WORKSPACE_ROOT}")
     print(f"Engine:    {get_engine_name()}")
     print(f"Model:     {get_model_name()}")
+    provider_name = get_active_provider_name()
+    provider_config = get_provider_config(provider_name)
+    provider_key = provider_config.get("apiKey") or provider_config.get("api_key") or ""
+    print(f"Provider:  {provider_name}")
     print(f"Base URL:  {get_base_url()}")
     print(f"Scan sandbox: {get_scan_sandbox_mode()}")
     print(f"Install deps for scan: {'yes' if get_install_project_deps() else 'no'}")
     print(f"MCP tools: {'enabled' if get_enable_mcp_tools() else 'disabled'}")
+    print(f"Channels:  {', '.join(get_enabled_channels()) or 'none'}")
     print(f"Amap key:  {'configured' if get_amap_api_key() else 'missing'}")
+    print(f"Provider key: {'configured' if provider_key else 'missing'}")
     print(f"API key:   {'configured' if get_api_key() else 'missing'}")
     return 0 if get_api_key() else 1
 
