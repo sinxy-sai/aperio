@@ -22,6 +22,7 @@ from .config import (
 )
 from .deepagents_engine import run_deep_agent
 from .event_protocol import normalize_event
+from .local_knowledge import build_project_knowledge_context
 from .memory import build_memory_context, record_run_memory
 from .scanner import compact_scan_summary, run_code_health_scan, write_compact_scan_summary
 
@@ -446,6 +447,7 @@ def build_input_bundle(
             "demo_runtime_dependency": False,
         },
         "persistent_memory": build_memory_context(query=task_text),
+        "project_knowledge": build_project_knowledge_context(query=task_text, project_root=code_project_path),
     }
 
 
@@ -497,6 +499,10 @@ def _write_input_files_for_run(run_root: Path, message: str, input_bundle: dict[
     _write_text(
         inputs_dir / "persistent_memory.md",
         str((input_bundle.get("persistent_memory") or {}).get("markdown") or "No persistent memory has been recorded yet."),
+    )
+    _write_text(
+        inputs_dir / "project_context.md",
+        str((input_bundle.get("project_knowledge") or {}).get("markdown") or "No project knowledge matched the current request."),
     )
 
 

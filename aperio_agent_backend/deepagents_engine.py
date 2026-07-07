@@ -168,6 +168,8 @@ def run_deep_agent(
         )
     if (input_bundle.get("persistent_memory") or {}).get("enabled"):
         runtime_notes += "- Persistent memory is available at /inputs/persistent_memory.md. Use it as background context, but do not treat old memories as current facts without checking dates.\n"
+    if (input_bundle.get("project_knowledge") or {}).get("enabled"):
+        runtime_notes += "- Project knowledge search results are available at /inputs/project_context.md. Treat them as local background context and cite source paths when they influence your answer.\n"
 
     config = {"configurable": {"thread_id": run_root.name}}
     response = router.invoke(
@@ -296,6 +298,10 @@ def _write_input_files(
     )
     (inputs_dir / "persistent_memory.md").write_text(
         str((input_bundle.get("persistent_memory") or {}).get("markdown") or "No persistent memory has been recorded yet.") + "\n",
+        encoding="utf-8",
+    )
+    (inputs_dir / "project_context.md").write_text(
+        str((input_bundle.get("project_knowledge") or {}).get("markdown") or "No project knowledge matched the current request.") + "\n",
         encoding="utf-8",
     )
     (inputs_dir / "code_scan_summary.json").write_text(

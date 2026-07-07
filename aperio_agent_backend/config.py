@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - minimal local checks may not install optional runtime deps
+    def load_dotenv(*_: Any, **__: Any) -> bool:
+        return False
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -35,6 +39,9 @@ WORKSPACE_ROOT = Path(
 ).expanduser().resolve()
 MEMORY_DB_PATH = Path(
     _env_or("APERIO_MEMORY_DB", str(APERIO_HOME / "memory.sqlite3"))
+).expanduser().resolve()
+KNOWLEDGE_DB_PATH = Path(
+    _env_or("APERIO_KNOWLEDGE_DB", str(APERIO_HOME / "knowledge.sqlite3"))
 ).expanduser().resolve()
 
 
@@ -244,6 +251,18 @@ def get_memory_enabled() -> bool:
 
 def get_memory_db_path() -> Path:
     return MEMORY_DB_PATH
+
+
+def get_knowledge_enabled() -> bool:
+    return os.environ.get("APERIO_KNOWLEDGE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def get_knowledge_db_path() -> Path:
+    return KNOWLEDGE_DB_PATH
+
+
+def get_safe_execution_enabled() -> bool:
+    return os.environ.get("APERIO_SAFE_EXECUTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def get_amap_api_key() -> str:

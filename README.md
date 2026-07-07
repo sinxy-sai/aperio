@@ -46,6 +46,9 @@ APERIO_TOOL_MAX_RETRIES=2
 APERIO_INSTALL_PROJECT_DEPS=0
 APERIO_SCAN_SANDBOX=auto
 APERIO_ENABLE_MCP=0
+APERIO_KNOWLEDGE_ENABLED=1
+APERIO_KNOWLEDGE_DB=
+APERIO_SAFE_EXECUTION_ENABLED=1
 AMAP_API_KEY=
 FEISHU_APP_ID=
 FEISHU_APP_SECRET=
@@ -120,6 +123,8 @@ Useful interactive commands:
 /runs       List recent runs
 /artifacts  List artifacts for the last run
 /channels   Show software channel config status
+/knowledge  Sync or search local project knowledge
+/safe       Run a conservative read-only allowlisted command
 /exit       Quit
 ```
 
@@ -155,6 +160,10 @@ The default engine is `deepagents`, which runs a package-native DeepAgents route
 Code-health mode now packages the migrated demo skills and deterministic `code-health-toolkit`. By default it tries the packaged Docker sandbox first and falls back to host scanning if Docker is unavailable. Set `APERIO_SCAN_SANDBOX=host` to force host-only scanning, or `APERIO_SCAN_SANDBOX=docker` to require Docker.
 
 DeepAgents runs on a routed workspace backend. Inputs, outputs, local policy files, packaged skills, per-agent skill views, memory, and temp state are separated by virtual paths, and each subagent receives only its assigned read-only skill source.
+
+Local project knowledge is indexed with SQLite FTS, not a heavy vector database. Aperio indexes README files, `docs/**/*.md`, and selected project notes into `~/.aperio/knowledge.sqlite3` by default, then writes matching snippets for each run to `/inputs/project_context.md`. Use `/knowledge sync`, `/knowledge search <query>`, and `/knowledge path` in the CLI for manual inspection.
+
+A conservative safe-execution wrapper is available for single-user local workflows. It rejects shell metacharacters, keeps the working directory inside `APERIO_PROJECT_ROOT`, enforces timeouts, and only allows a small read-only command set such as `git status`, `git diff`, `git log`, `rg`, and `python -m py_compile`/`compileall`. Use `/safe <command>` in the CLI to test the policy.
 
 Optional MCP tools are disabled by default. Install `aperio-agent[mcp]`, set `APERIO_ENABLE_MCP=1`, and optionally set `AMAP_API_KEY` to enable public web search and Amap tools for agent workflows.
 

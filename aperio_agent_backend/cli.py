@@ -39,6 +39,12 @@ from .config import (
     get_scan_sandbox_mode,
     save_default_config,
 )
+from .local_knowledge import (
+    knowledge_db_path,
+    knowledge_enabled,
+    search_project_knowledge,
+    sync_project_knowledge,
+)
 from .memory import (
     add_memory,
     clear_memories,
@@ -51,6 +57,7 @@ from .memory import (
 )
 from .resources import packaged_skills_root
 from .runner import run_agent
+from .safe_execution import run_safe_command, safe_execution_enabled
 
 
 @dataclass(frozen=True)
@@ -92,6 +99,8 @@ COMMAND_SPECS = [
 
 
 COMMAND_SPECS.insert(-2, CommandSpec("/memory", "查看持久 memory", "/memory [add|delete|path] ...", aliases=("/mem",)))
+COMMAND_SPECS.insert(-2, CommandSpec("/knowledge", "同步或搜索项目知识", "/knowledge sync|search|path ...", aliases=("/know",)))
+COMMAND_SPECS.insert(-2, CommandSpec("/safe", "运行安全只读命令", "/safe <command>"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,6 +236,10 @@ def _handle_repl_command(command_line: str, state: ReplState) -> int | None:
         _print_history(state, _parse_limit(args, default=12, maximum=100))
     elif command in {"/memory", "/mem"}:
         _handle_memory_command(args)
+    elif command in {"/knowledge", "/know"}:
+        _handle_knowledge_command(args)
+    elif command == "/safe":
+        _handle_safe_command(args)
     elif command == "/clear":
         state.history.clear()
         print("Cleared in-memory CLI history.")
@@ -403,6 +416,48 @@ def _handle_memory_command(args: list[str]) -> None:
         _print_memories(int(action))
         return
     print("Usage: /memory [n] | /memory search <query> | /memory add <content> | /memory update <id> <content> | /memory delete <id> | /memory clear --yes | /memory export [path] | /memory path")
+
+
+def _handle_knowledge_command(args: list[str]) -> None:
+    if not args:
+        print("Usage: /knowledge sync | /knowledge search <query> | /knowledge path")
+        return
+    action = args[0].lower()
+    if action == "path":
+        print(f"enabled = {knowledge_enabled()}")
+        print(knowledge_db_path())
+        return
+    if action == "sync":
+        result = sync_project_knowledge()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if action in {"search", "find"}:
+        query = " ".join(args[1:]).strip()
+        if not query:
+            print("Usage: /knowledge search <query>")
+            return
+        hits = search_project_knowledge(query, limit=10)
+        if not hits:
+            print("No project knowledge matched.")
+            return
+        for index, hit in enumerate(hits, start=1):
+            text = hit.content.replace("\n", " ")
+            if len(text) > 220:
+                text = text[:217] + "..."
+            print(f"{index}. {hit.path} | {hit.title} | score={hit.score:.3f}")
+            print(f"   {text}")
+        return
+    print("Usage: /knowledge sync | /knowledge search <query> | /knowledge path")
+
+
+def _handle_safe_command(args: list[str]) -> None:
+    command = " ".join(args).strip()
+    if not command:
+        print(f"safe_execution = {safe_execution_enabled()}")
+        print("Usage: /safe <read-only command>, e.g. /safe git status --short")
+        return
+    result = run_safe_command(command)
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
 
 
 def _print_memories(limit: int) -> None:
