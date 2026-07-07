@@ -186,6 +186,10 @@ function ChatPage({ navigate }) {
     let cancelled = false;
     const syncRun = async () => {
       try {
+        const activeStream = streamRef.current;
+        if (activeStream?.sessionId === sessionId && !activeStream.stopped) {
+          return;
+        }
         const detail = await fetchJson(`/api/runs/${encodeURIComponent(runId)}`);
         if (cancelled) return;
         setArtifacts(detail.artifacts || []);
@@ -194,6 +198,11 @@ function ChatPage({ navigate }) {
           ? detail.observability.events.map(normalizeTraceEvent)
           : [];
         if (detailEvents.length) setSessionTraceEvents(sessionId, detailEvents);
+        if (detail.running) {
+          setRunning(true);
+          setRunMeta("agent 仍在运行，正在同步状态");
+          return;
+        }
         const perf = detail.performance || {};
         const isComplete = Object.prototype.hasOwnProperty.call(perf, "ok") || Boolean(perf.error);
         if (!isComplete) {
@@ -202,7 +211,7 @@ function ChatPage({ navigate }) {
           return;
         }
         const answer = detail.answer || runDetailFallbackAnswer(perf);
-        completeRunMessage(sessionId, runId, answer);
+        completeRunMessage(sessionId, runId, answer, activeSession?.activeCompletionKey || runId);
         setRunMeta(`完成 · ${Number(perf.duration_seconds || 0).toFixed(1)}s`);
       } catch (error) {
         if (!cancelled) setRunMeta(`同步运行状态失败：${error.message}`);
@@ -215,7 +224,7 @@ function ChatPage({ navigate }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeSession?.id, activeSession?.runId, activeSession?.draftAssistant]);
+  }, [activeSession?.id, activeSession?.runId, activeSession?.draftAssistant, activeSession?.activeCompletionKey]);
 
   function updateSessions(updater, saveActiveId = activeId) {
     setSessions((current) => {
@@ -280,7 +289,7 @@ function ChatPage({ navigate }) {
     );
   }
 
-  function completeRunMessage(sessionId, runId, answer) {
+  function completeRunMessage(sessionId, runId, answer, completionKey = runId) {
     if (!sessionId || !runId) return;
     const message = { id: makeMessageId(), role: "assistant", text: answer || "运行完成。" };
     updateSessionById(
@@ -288,11 +297,13 @@ function ChatPage({ navigate }) {
       (session) => {
         const completed = new Set(session.completedRunIds || []);
         const messages = session.messages || [];
-        const shouldAppend = !completed.has(runId);
-        completed.add(runId);
+        const key = completionKey || runId;
+        const shouldAppend = !completed.has(key);
+        completed.add(key);
         return {
           runId,
           draftAssistant: "",
+          activeCompletionKey: "",
           completedRunIds: Array.from(completed).slice(-80),
           messages: shouldAppend ? [...messages, message] : messages,
         };
@@ -440,6 +451,17 @@ function ChatPage({ navigate }) {
       runId: detail.runId,
       traceEvents: Array.isArray(detail.observability?.events) ? detail.observability.events.map(normalizeTraceEvent).slice(-120) : [],
     });
+    const messages = activeSession?.messages || [];
+    const lastMessage = messages.at(-1);
+    const isComplete = Object.prototype.hasOwnProperty.call(detail.performance || {}, "ok") || Boolean(detail.performance?.error);
+    if (activeSession?.id && !detail.running && !activeSession?.draftAssistant && isComplete && detail.answer && lastMessage?.role === "user") {
+      completeRunMessage(
+        activeSession.id,
+        detail.runId,
+        detail.answer,
+        `refresh:${detail.runId}:${lastMessage.id || messages.length}:${detail.answer.length}`,
+      );
+    }
     setRunMeta("产物已刷新");
   }
 
@@ -494,8 +516,12 @@ function ChatPage({ navigate }) {
       void fetch(`/api/runs/${encodeURIComponent(targetRunId)}/cancel`, { method: "POST" }).catch(() => {});
     }
     setRunning(false);
-    if (targetSessionId) setSessionDraft(targetSessionId, "");
-    else setDraftAssistant("");
+    if (targetSessionId) {
+      setSessionDraft(targetSessionId, "");
+      patchSessionById(targetSessionId, { activeCompletionKey: "" }, { persistNow: true });
+    } else {
+      setDraftAssistant("");
+    }
     setRunMeta("已停止，可重新提问");
     addMessage("assistant", "已停止本次运行。", targetSessionId);
   }
@@ -515,11 +541,14 @@ function ChatPage({ navigate }) {
     setDraftAssistant("正在连接后端...");
     setRunMeta("agent 正在处理");
     setTraceEvents([]);
-    patchSessionById(targetSessionId, { traceEvents: [] }, { persistNow: true });
     const reusableRunId = activeSession?.runId || "";
+    const turnId = makeMessageId();
+    const initialCompletionKey = `${reusableRunId || "pending"}:${turnId}`;
+    patchSessionById(targetSessionId, { traceEvents: [], activeCompletionKey: initialCompletionKey }, { persistNow: true });
     const stream = {
       controller: new AbortController(),
       runId: reusableRunId,
+      turnId,
       stopped: false,
       sessionId: targetSessionId,
       liveEvents: [],
@@ -542,7 +571,7 @@ function ChatPage({ navigate }) {
         if (eventRunId) {
           stream.runId = eventRunId;
           setSelectedRunId(eventRunId);
-          patchSessionById(targetSessionId, { runId: eventRunId }, { persistNow: true });
+          patchSessionById(targetSessionId, { runId: eventRunId, activeCompletionKey: `${eventRunId}:${stream.turnId}` }, { persistNow: true });
         }
         if (eventData.type === "status") {
           const statusText = stream.liveEvents.length
@@ -570,6 +599,7 @@ function ChatPage({ navigate }) {
           stream.stopped = true;
           setSessionDraft(targetSessionId, "");
           setDraftAssistant("");
+          patchSessionById(targetSessionId, { activeCompletionKey: "" }, { persistNow: true });
           setRunMeta("已停止，可重新提问");
           return;
         }
@@ -580,7 +610,8 @@ function ChatPage({ navigate }) {
 
         const result = eventData.data || {};
         const answer = result.answer || (result.ok ? "运行完成。" : "运行失败。");
-        completeRunMessage(targetSessionId, result.run_id || stream.runId || "", answer);
+        const resultRunId = result.run_id || stream.runId || "";
+        completeRunMessage(targetSessionId, resultRunId, answer, `${resultRunId}:${stream.turnId}`);
         setArtifacts(result.artifacts || []);
         setSelectedRunId(result.run_id || "");
         patchSessionById(targetSessionId, { runId: result.run_id || "" }, { persistNow: true });
@@ -590,6 +621,7 @@ function ChatPage({ navigate }) {
       if (stream.stopped || error.name === "AbortError") {
         setSessionDraft(targetSessionId, "");
         setDraftAssistant("");
+        patchSessionById(targetSessionId, { activeCompletionKey: "" }, { persistNow: true });
         setRunMeta("已停止，可重新提问");
         return;
       }
