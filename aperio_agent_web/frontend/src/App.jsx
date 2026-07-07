@@ -965,7 +965,7 @@ function ObservabilityPage({ navigate }) {
   const [routeFilter, setRouteFilter] = useState("");
   const [selectedRunId, setSelectedRunId] = useState(initialRun);
   const [detail, setDetail] = useState(null);
-  const [collapsed, setCollapsed] = useState({ agents: false, events: false, files: false });
+  const [collapsed, setCollapsed] = useState({ agents: false, events: false, validation: false, files: false });
 
   useEffect(() => {
     fetch("/api/health").then((response) => response.json()).then(setHealth).catch((error) => setHealth({ ok: false, error: error.message }));
@@ -1013,6 +1013,7 @@ function ObservabilityPage({ navigate }) {
   const agents = Object.entries(obs.by_agent || {}).sort((a, b) => totalCalls(b[1]) - totalCalls(a[1]));
   const files = detail?.files || [];
   const artifacts = detail?.artifacts || [];
+  const artifactValidation = perf.artifact_validation || perf.artifactValidation || {};
 
   function toggle(key) {
     setCollapsed((current) => ({ ...current, [key]: !current[key] }));
@@ -1127,7 +1128,7 @@ function ObservabilityPage({ navigate }) {
                   <button className={`runs-table-row ${run.runId === selectedRunId ? "active" : ""}`} type="button" key={run.runId} onClick={() => setSelectedRunId(run.runId)}>
                     <span>{run.runId}</span>
                     <span>{run.route || "unknown"}</span>
-                    <span className={run.ok === false || run.route === "error" ? "status-error" : "status-ok"}>{run.ok === false || run.route === "error" ? "error" : "ok"}</span>
+                    <span className={run.ok === false || run.route === "error" || run.artifactValidationOk === false ? "status-error" : "status-ok"}>{run.ok === false || run.route === "error" ? "error" : run.artifactValidationOk === false ? "artifact" : "ok"}</span>
                     <span>{formatLatency(run.durationSeconds)}</span>
                     <span>{formatTokenCount(run.totalTokens, run.modelCalls)}</span>
                   </button>
@@ -1142,13 +1143,17 @@ function ObservabilityPage({ navigate }) {
                 {!agents.length ? <div className="empty-state">暂无 Agent 调用数据。</div> : agents.map(([name, counts]) => <AgentRow key={name} name={name} counts={counts} />)}
               </Surface>
 
+              <Surface title="产物校验" meta={artifactValidation.ok === false ? "needs attention" : "ok"} collapsed={collapsed.validation} onToggle={() => toggle("validation")} className="validation-surface">
+                <ArtifactValidation validation={artifactValidation} />
+              </Surface>
+
               <Surface title="产物与文件" meta={`${files.length} files`} collapsed={collapsed.files} onToggle={() => toggle("files")} className="files-surface">
                 <GroupedFiles runId={selectedRunId} files={files} artifacts={artifacts} />
               </Surface>
             </div>
 
             <Surface title="事件时间线" meta={`${events.length} events`} collapsed={collapsed.events} onToggle={() => toggle("events")} className="timeline-surface">
-              {!events.length ? <div className="empty-state">暂无模型或工具事件。</div> : events.slice().reverse().map((event, index) => <EventRow key={index} event={event} />)}
+              {!events.length ? <div className="empty-state">暂无模型或工具事件。</div> : events.slice().reverse().map((event, index) => <EventRow key={event.eventId || event.event_id || index} event={event} />)}
             </Surface>
           </section>
         </div>
@@ -1276,7 +1281,7 @@ function TraceList({ events, running }) {
             </div>
           </div>
         ) : (
-          events.slice(-18).map((event, index) => <TraceRow event={event} key={`${event.phase || event.type}-${index}`} />)
+          events.slice(-18).map((event, index) => <TraceRow event={event} key={event.eventId || event.event_id || `${event.phase || event.type}-${index}`} />)
         )}
       </div>
     </section>
@@ -1284,7 +1289,8 @@ function TraceList({ events, running }) {
 }
 
 function TraceRow({ event }) {
-  const kind = event.type === "tool" ? "tool" : event.type === "model" ? "model" : event.type === "artifact" ? "artifact" : "phase";
+  const legacyType = event.legacyType || event.legacy_type || event.type;
+  const kind = legacyType === "tool" ? "tool" : legacyType === "model" ? "model" : legacyType === "artifact" ? "artifact" : "phase";
   return (
     <div className={`trace-row trace-${kind}`}>
       <span className="trace-dot" />
@@ -1358,15 +1364,42 @@ function AgentRow({ name, counts }) {
   );
 }
 
+function ArtifactValidation({ validation }) {
+  const expected = Array.isArray(validation?.expected) ? validation.expected : [];
+  if (!expected.length) return <div className="empty-state">暂无产物校验规则。</div>;
+  return (
+    <div className="validation-list">
+      <div className={`validation-summary ${validation.ok === false ? "validation-error" : "validation-ok"}`}>
+        {validation.ok === false ? <X size={15} /> : <Check size={15} />}
+        <span>{validation.ok === false ? "存在缺失或不可用产物" : "关键产物已生成"}</span>
+      </div>
+      {expected.map((item) => {
+        const ok = Boolean(item.usable);
+        return (
+          <div className="validation-row" key={item.path}>
+            <span className={ok ? "validation-ok" : "validation-error"}>{ok ? <Check size={15} /> : <X size={15} />}</span>
+            <div>
+              <strong>{item.path}</strong>
+              <small>{item.exists ? `${formatNumber(item.size)} bytes` : "missing"} · {item.usable ? "usable" : "not usable"}</small>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function EventRow({ event }) {
-  const type = event.type || "event";
-  const title = event.tool ? `${type}: ${event.tool}` : type;
+  const type = eventProtocolType(event);
+  const legacyType = event.legacyType || event.legacy_type || event.type || "event";
+  const title = event.name || event.tool || event.phase || type;
   const tokens = event.tokens ? ` · ${event.tokens.input_tokens || 0}/${event.tokens.output_tokens || 0} tok` : "";
   return (
     <div className="event-row">
-      <span className={`event-type ${type === "tool" ? "tool" : ""}`}>{type.slice(0, 4)}</span>
+      <span className={`event-type ${legacyType === "tool" ? "tool" : ""}`}>{eventStatusLabel(event, type)}</span>
       <div className="event-body">
         <strong>{title}</strong>
+        <span className="event-meta">{type} · {event.status || "updated"}</span>
         <span className="event-meta">{event.agent || "agent"}{tokens}{event.error ? ` · error: ${event.error}` : ""}</span>
       </div>
       <span className="event-time">{Number(event.elapsed_ms || 0).toFixed(1)} ms</span>
@@ -1452,15 +1485,31 @@ function normalizeTraceEvent(event) {
   return event && typeof event === "object" ? event : { type: "phase", message: String(event || "agent event") };
 }
 
+function eventProtocolType(event) {
+  return event?.eventType || event?.event_type || event?.type || "event";
+}
+
+function eventStatusLabel(event, type = eventProtocolType(event)) {
+  const status = event?.status || "";
+  if (status === "failed") return "fail";
+  if (status === "running") return "run";
+  if (status === "completed") return "done";
+  return String(type || "event").split(".").pop().slice(0, 4) || "evt";
+}
+
 function traceTitle(event) {
+  if (event.name && (event.eventType || event.event_type)) return event.name;
   if (event.type === "model") return `${event.agent || "agent"} 模型调用`;
   if (event.type === "tool") return `${event.agent || "agent"} 调用 ${event.tool || "tool"}`;
   if (event.type === "artifact") return `生成产物 ${event.path || ""}`.trim();
-  return event.phase || event.type || "agent event";
+  return event.phase || eventProtocolType(event) || "agent event";
 }
 
 function traceMeta(event) {
   const parts = [];
+  const protocolType = eventProtocolType(event);
+  if (protocolType && protocolType !== event.type) parts.push(protocolType);
+  if (event.status) parts.push(event.status);
   if (event.agent && event.type !== "model" && event.type !== "tool") parts.push(event.agent);
   if (event.tool && event.type !== "tool") parts.push(event.tool);
   if (event.route) parts.push(event.route);

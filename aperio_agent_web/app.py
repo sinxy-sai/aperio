@@ -28,6 +28,7 @@ from aperio_agent_backend.config import (
     get_model_name,
     get_scan_sandbox_mode,
 )
+from aperio_agent_backend.event_protocol import normalize_event
 from aperio_agent_backend.memory import (
     add_memory,
     clear_memories,
@@ -183,6 +184,7 @@ async def chat_stream(request: Request) -> StreamingResponse:
     RUN_LIVE_EVENTS[run_id] = []
 
     def emit_trace(event: dict[str, Any]) -> None:
+        event = normalize_event(event, run_id=run_id)
         live_events = RUN_LIVE_EVENTS.setdefault(run_id, [])
         live_events.append(event)
         del live_events[:-300]
@@ -256,12 +258,15 @@ async def chat_stream(request: Request) -> StreamingResponse:
             {
                 "type": "trace",
                 "run_id": run_id,
-                "event": {
-                    "type": "phase",
-                    "phase": "result_ready",
-                    "message": f"返回结果，{len(result.artifacts)} 个产物",
-                    "artifact_count": len(result.artifacts),
-                },
+                "event": normalize_event(
+                    {
+                        "type": "phase",
+                        "phase": "result_ready",
+                        "message": f"result ready: {len(result.artifacts)} artifacts",
+                        "artifact_count": len(result.artifacts),
+                    },
+                    run_id=run_id,
+                ),
             }
         )
         yield _json_line({"type": "result", "data": result.to_dict(), "run_id": run_id})
@@ -294,6 +299,8 @@ def runs(limit: int = 30) -> dict[str, Any]:
                 "modelCalls": performance.get("model_calls", 0),
                 "toolCalls": performance.get("tool_calls", 0),
                 "totalTokens": performance.get("total_tokens", 0),
+                "artifactValidation": performance.get("artifact_validation", {}),
+                "artifactValidationOk": bool((performance.get("artifact_validation") or {}).get("ok", True)),
                 "artifactCount": len(artifacts),
                 "createdAt": run_root.name[:15],
             }
@@ -530,6 +537,8 @@ def _run_summaries() -> list[dict[str, Any]]:
                 "modelCalls": performance.get("model_calls", 0),
                 "toolCalls": performance.get("tool_calls", 0),
                 "totalTokens": performance.get("total_tokens", 0),
+                "artifactValidation": performance.get("artifact_validation", {}),
+                "artifactValidationOk": bool((performance.get("artifact_validation") or {}).get("ok", True)),
                 "artifactCount": len(artifacts),
                 "createdAt": run_root.name[:15],
                 "createdAtDate": created_at_date,
@@ -547,7 +556,12 @@ def _parse_run_datetime(run_id: str) -> datetime | None:
 
 
 def _is_failed_run(item: dict[str, Any]) -> bool:
-    return item.get("ok") is False or item.get("route") == "error" or bool(item.get("error"))
+    return (
+        item.get("ok") is False
+        or item.get("route") == "error"
+        or bool(item.get("error"))
+        or item.get("artifactValidationOk") is False
+    )
 
 
 def _memory_item_dict(item: Any) -> dict[str, Any]:

@@ -21,6 +21,7 @@ from .config import (
     get_scan_sandbox_mode,
 )
 from .deepagents_engine import run_deep_agent
+from .event_protocol import normalize_event
 from .memory import build_memory_context, record_run_memory
 from .scanner import compact_scan_summary, run_code_health_scan
 
@@ -180,6 +181,8 @@ def run_agent(
 
         if route == "code_health":
             answer = _finalize_code_health_answer(run_root, answer)
+        elif route == "prd":
+            answer = _finalize_prd_answer(run_root, answer)
 
         _raise_if_cancelled(cancel_event)
         _write_answer(run_root, answer)
@@ -259,7 +262,7 @@ def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
     if event_callback is None:
         return
     try:
-        event_callback(event)
+        event_callback(normalize_event(event))
     except Exception:
         return
 
@@ -621,6 +624,71 @@ def _run_code_health_lite(message: str, run_root: Path, scan_summary: dict[str, 
     return "代码健康报告已完成，产物为 `outputs/code_health/code_health_report.md`。"
 
 
+def _finalize_prd_answer(run_root: Path, agent_answer: str) -> str:
+    prd_path = run_root / "outputs" / "prd_review" / "prd_v2_final.md"
+    matrix_path = run_root / "outputs" / "prd_review" / "review_matrix.md"
+    if not _usable_text_file(prd_path) or not _usable_text_file(matrix_path):
+        _write_prd_fallback_outputs(run_root, agent_answer)
+
+    prd = prd_path.read_text(encoding="utf-8", errors="replace").strip() if prd_path.exists() else ""
+    matrix = matrix_path.read_text(encoding="utf-8", errors="replace").strip() if matrix_path.exists() else ""
+    sections = []
+    if prd:
+        sections.append(_trim_answer(prd, 12000))
+    if matrix:
+        sections.extend(["", "## 评审矩阵", "", _trim_answer(matrix, 6000)])
+    sections.extend(
+        [
+            "",
+            "---",
+            "完整 Markdown 文件：`outputs/prd_review/prd_v2_final.md`、`outputs/prd_review/review_matrix.md`",
+        ]
+    )
+    return "\n".join(sections).strip() if sections else (agent_answer or "PRD 评审已完成。")
+
+
+def _write_prd_fallback_outputs(run_root: Path, agent_answer: str) -> None:
+    prd_dir = run_root / "outputs" / "prd_review"
+    prd_path = prd_dir / "prd_v2_final.md"
+    matrix_path = prd_dir / "review_matrix.md"
+    user_request = _read_text_file(run_root / "inputs" / "user_request.md")
+
+    if not _usable_text_file(prd_path):
+        sections = [
+            "# PRD v2",
+            "",
+            "> 后端检测到 DeepAgents 未写出 PRD 最终产物，已根据用户原始请求和 agent 返回内容生成兜底 PRD。该文件需要人工复核。",
+            "",
+            "## 原始需求",
+            "",
+            user_request or "未记录原始需求。",
+            "",
+            "## Agent 返回摘要",
+            "",
+            agent_answer or "Agent 未返回可用摘要。",
+            "",
+            "## 待补充信息",
+            "",
+            "- 业务背景、目标用户、核心场景、范围边界、验收标准需要进一步确认。",
+            "- 若需要完整 PRD，请重新运行任务并检查观测页中的子 agent 事件和最终写文件状态。",
+        ]
+        _write_text(prd_path, "\n".join(sections))
+
+    if not _usable_text_file(matrix_path):
+        matrix = "\n".join(
+            [
+                "# PRD 评审矩阵",
+                "",
+                "| 维度 | 结论 | 风险等级 | 建议 |",
+                "| --- | --- | --- | --- |",
+                "| 完整性 | 最终评审矩阵未由 DeepAgents 正常写出 | 中 | 补充业务背景、用户场景、验收标准后重新评审 |",
+                "| 可执行性 | 当前仅有兜底产物，不能替代正式评审 | 中 | 检查观测页事件，确认 writer/editor 子 agent 是否完成 |",
+                "| 可验证性 | 需求验收标准可能不足 | 中 | 为每个核心功能补充可测试验收条件 |",
+            ]
+        )
+        _write_text(matrix_path, matrix)
+
+
 def _finalize_code_health_answer(run_root: Path, agent_answer: str) -> str:
     report_path = run_root / "outputs" / "code_health" / "code_health_report.md"
     if not report_path.exists() or report_path.stat().st_size < 80:
@@ -728,6 +796,16 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _read_text_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _usable_text_file(path: Path, min_size: int = 40) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size >= min_size and bool(_read_text_file(path))
+
+
 def _trim_answer(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -766,6 +844,7 @@ def _write_performance(run_root: Path, started: float, route: str, ok: bool, err
         "backend": "aperio_agent_backend",
         "engine": get_engine_name(),
         "model": get_model_name(),
+        "artifact_validation": _artifact_validation(run_root, route),
     }
     observability_path = run_root / "observability.json"
     if observability_path.exists():
@@ -780,3 +859,28 @@ def _write_performance(run_root: Path, started: float, route: str, ok: bool, err
     if error:
         payload["error"] = error
     _write_text(run_root / "performance.json", json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _artifact_validation(run_root: Path, route: str) -> dict[str, Any]:
+    expected_by_route = {
+        "code_health": ["outputs/code_health/code_health_report.md"],
+        "prd": ["outputs/prd_review/prd_v2_final.md", "outputs/prd_review/review_matrix.md"],
+        "general": ["answer.md"],
+    }
+    expected = expected_by_route.get(route, ["answer.md"])
+    items = []
+    for rel_path in expected:
+        path = run_root / rel_path
+        exists = path.exists() and path.is_file()
+        items.append(
+            {
+                "path": rel_path,
+                "exists": exists,
+                "size": path.stat().st_size if exists else 0,
+                "usable": _usable_text_file(path, min_size=10) if exists else False,
+            }
+        )
+    return {
+        "expected": items,
+        "ok": all(item["usable"] for item in items),
+    }

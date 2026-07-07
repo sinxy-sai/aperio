@@ -1707,6 +1707,70 @@ pre {
   margin-bottom: 10px;
 }
 
+.validation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.validation-summary,
+.validation-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfbfc;
+  padding: 12px;
+}
+
+.validation-summary {
+  font-weight: 800;
+}
+
+.validation-row > span,
+.validation-summary > svg {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 8px;
+  background: #edf7f2;
+}
+
+.validation-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.validation-row strong,
+.validation-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.validation-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.validation-ok {
+  color: var(--green);
+}
+
+.validation-error {
+  color: var(--red);
+}
+
+.validation-error > svg,
+.validation-row > .validation-error {
+  background: #fff1f0;
+}
+
 .agent-bars {
   display: grid;
   grid-template-columns: var(--model-share, 1fr) var(--tool-share, 1fr);

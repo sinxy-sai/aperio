@@ -29,6 +29,7 @@ from .config import (
     get_tool_max_retries,
 )
 from .hitl import build_interrupt_policy, resolve_human_interrupts
+from .event_protocol import normalize_event
 from .middleware import (
     FinalOutputGuardMiddleware,
     RouterToolGuardMiddleware,
@@ -204,7 +205,7 @@ def _emit_event(event_callback: Any | None, event: dict[str, Any]) -> None:
     if event_callback is None:
         return
     try:
-        event_callback(event)
+        event_callback(normalize_event(event))
     except Exception:
         return
 

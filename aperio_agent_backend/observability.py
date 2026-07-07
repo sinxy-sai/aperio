@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 
+from .event_protocol import normalize_event
+
 
 @dataclass
 class RunTelemetry:
@@ -103,6 +105,7 @@ class TelemetryMiddleware(AgentMiddleware):
             event["tokens"] = usage
         if error:
             event["error"] = error
+        event = normalize_event(event)
         self.telemetry.events.append(event)
         _emit_event(self.event_callback, event)
 
@@ -118,6 +121,7 @@ class TelemetryMiddleware(AgentMiddleware):
         }
         if error:
             event["error"] = error
+        event = normalize_event(event)
         self.telemetry.events.append(event)
         _emit_event(self.event_callback, event)
 
