@@ -424,6 +424,8 @@ python demo/test_amap_mcp_tools.py
 > [!WARNING]
 > 本项目默认面向单用户本地使用，不建议在未增加认证、权限控制、审计和网络隔离前直接暴露到公网。
 
+完整的漏洞报告方式、密钥管理、MCP、飞书/Lark 网关和 Docker 扫描安全边界请参见 [Security Policy](SECURITY.md)。
+
 - 本项目定位为单用户本地工作台，默认不提供多租户认证、权限隔离或公网生产部署安全边界。
 - `.env`、`~/.aperio/.env` 和 `~/.aperio/config.json` 中可能包含密钥，请勿提交到公开仓库。
 - `APERIO_SAFE_EXECUTION_ENABLED=1` 默认启用保守安全执行策略，仅允许少量只读命令。
